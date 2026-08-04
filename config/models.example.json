@@ -1,0 +1,31 @@
+[
+  {
+    "id": "your-audio-deployment",
+    "label": "Audio transcription deployment",
+    "deployment": "replace-with-your-audio-capable-deployment-name",
+    "description": "Use only a deployment whose model accepts audio input for transcription.",
+    "capabilities": ["audio", "transcription"],
+    "parameters": [
+      {
+        "name": "temperature",
+        "label": "Temperature",
+        "kind": "number",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 1,
+        "step": 0.1,
+        "description": "Keep at zero for reproducible transcript comparisons."
+      },
+      {
+        "name": "max_output_tokens",
+        "label": "Maximum output tokens",
+        "kind": "number",
+        "default": 1000,
+        "minimum": 32,
+        "maximum": 4000,
+        "step": 32,
+        "description": "Upper limit for the transcript response."
+      }
+    ]
+  }
+]

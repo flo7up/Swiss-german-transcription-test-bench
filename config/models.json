@@ -1,0 +1,20 @@
+[
+	{
+		"id": "openai-realtime-2",
+		"label": "OpenAI Realtime 2",
+		"deployment": "gpt-realtime-2",
+		"description": "Pay-per-use Global Standard realtime deployment. Batch tests decode each clip to PCM and request text-only transcription over the Realtime WebSocket API.",
+		"capabilities": ["audio", "transcription", "realtime"],
+		"transport": "azure-openai-realtime",
+		"parameters": []
+	},
+	{
+		"id": "openai-realtime-2-1",
+		"label": "OpenAI Realtime 2.1",
+		"deployment": "gpt-realtime-2.1",
+		"description": "Pay-per-use Global Standard preview realtime deployment with improved silence and noise handling. Batch tests request text-only transcription over the Realtime WebSocket API.",
+		"capabilities": ["audio", "transcription", "realtime"],
+		"transport": "azure-openai-realtime",
+		"parameters": []
+	}
+]

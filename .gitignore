@@ -1,0 +1,13 @@
+.venv/
+.runtime/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+frontend/node_modules/
+frontend/dist/
+data/swissdial/clips/
+data/swissdial/manifest.jsonl
+*.zip
+*.tar.gz

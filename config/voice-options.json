@@ -1,0 +1,46 @@
+[
+  {
+    "id": "openai-realtime-2",
+    "label": "OpenAI Realtime 2",
+    "kind": "Azure OpenAI realtime deployment",
+    "deployment": "gpt-realtime-2",
+    "version": "2026-05-06",
+    "availability": "Deployed",
+    "transport": "WebSocket or WebRTC",
+    "description": "Pay-per-use Global Standard deployment in Sweden Central. Audio input and output; use the Realtime API endpoint.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-realtime-2-1",
+    "label": "OpenAI Realtime 2.1",
+    "kind": "Azure OpenAI realtime deployment",
+    "deployment": "gpt-realtime-2.1",
+    "version": "2026-07-07",
+    "availability": "Deployed - Preview",
+    "transport": "WebSocket or WebRTC",
+    "description": "Pay-per-use Global Standard deployment in Sweden Central. Improved silence and noise handling over Realtime 2.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "voice-live-api",
+    "label": "Voice Live API",
+    "kind": "Managed Azure Speech API",
+    "deployment": "Uses a supported chat model",
+    "version": "2026-04-10 API",
+    "availability": "Ready - RBAC verified",
+    "transport": "WebSocket or WebRTC",
+    "description": "Managed speech-to-speech API with Azure Speech enhancement, configurable transcription, and Microsoft Entra authentication. Verified with the existing gpt-4.1 deployment; no separate Voice Live model deployment is required.",
+    "batch_runner_compatible": false
+  },
+  {
+    "id": "mai-voice-2-flash",
+    "label": "Microsoft MAI-Voice-2-Flash",
+    "kind": "Voice Live output voice",
+    "deployment": "Voice Live session configuration",
+    "version": "Preview",
+    "availability": "Ready - Voice Live verified",
+    "transport": "Voice Live session.update",
+    "description": "Low-latency Azure Speech output voice selected as an Azure standard Voice Live voice. Verified with MAI Transcribe in a Voice Live session; it is not a standalone model deployment.",
+    "batch_runner_compatible": false
+  }
+]

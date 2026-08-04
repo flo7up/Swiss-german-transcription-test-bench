@@ -1,0 +1,10 @@
+[project]
+name = "swiss-german-test-bench"
+version = "0.1.0"
+description = "A Microsoft Foundry benchmark workbench for Swiss German audio comprehension."
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["."]

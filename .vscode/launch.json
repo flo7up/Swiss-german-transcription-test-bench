@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Swiss German Benchmark API",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["backend.app.api:app", "--reload", "--port", "8001"],
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      "name": "Debug Agent Framework with Inspector",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5679
+      },
+      "preLaunchTask": "Open Agent Inspector",
+      "postDebugTask": "Terminate All Tasks",
+      "internalConsoleOptions": "neverOpen"
+    }
+  ]
+}

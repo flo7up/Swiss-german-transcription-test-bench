@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        const param = new URLSearchParams(window.location.search).get("scoutTheme");
+        let saved = null;
+        try {
+          saved = window.localStorage.getItem("swissdial-theme");
+        } catch {}
+        const explicit = ["dark", "light"].includes(param) ? param : saved;
+        const theme = explicit || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="/minimal.css" />
+    <title>Swiss German Transcription Benchmark</title>
+  </head>
+  <body>
+    <main id="app" aria-live="polite">Loading Swiss German transcription benchmark...</main>
+    <script src="/minimal-app.js" defer></script>
+  </body>
+</html>
