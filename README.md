@@ -1,6 +1,6 @@
 # Swiss German Transcription Benchmark
 
-A local-first workbench for comparing how voice-capable models transcribe Swiss German dialects. Select ETH SwissDial utterances and model deployments, run a balanced evaluation matrix, inspect each transcript, and compare Word Match, WER, CER, and latency.
+A local-first workbench for comparing how voice-capable models transcribe Swiss German dialects. Select ETH SwissDial utterances and model deployments, run a balanced evaluation matrix, inspect each transcript, and compare Word Match, WER, CER, streaming time to first token, and completion time.
 
 ![Swiss German benchmark workspace](docs/images/app-overview.png)
 
@@ -33,7 +33,7 @@ flowchart LR
   API --> Catalog[SwissDial manifest and clips]
   API --> Runner[Benchmark runner]
   Runner --> Models[Foundry or Azure OpenAI Realtime]
-  Runner --> Metrics[WER, CER, Word Match, latency]
+  Runner --> Metrics[WER, CER, Word Match, TTFT, completion]
   Runner --> SQLite[(Local SQLite history)]
 ```
 
@@ -147,19 +147,21 @@ Use **Audio dialect** to choose recordings from one canton or all available dial
 
 The UI also exposes **Word Match**, calculated as $\max(0, 1 - \text{WER})$. It gives a direct percentage where $100\%$ means the normalized word sequence exactly matched the reference. It is not a semantic similarity score: dialectal paraphrases or alternate spellings can still lower the value. Each row keeps the true reference utterance next to the actual model response so the score can be inspected in context.
 
-Use **Compare all dialects** in the model panel to select both Realtime deployments and queue a balanced 32-test run over the default 16-utterance corpus. While results arrive, the run view groups the active selected metric by dialect in a vertical bar chart. When several numeric result fields are selected, switch the chart among Match, WER, CER, and latency. Hover or focus a bar for the exact model, dialect, value, and scored utterance count.
+Use **Compare all dialects** in the model panel to select both Realtime deployments and queue a balanced 32-test run over the default 16-utterance corpus. While results arrive, the run view groups the active selected metric by dialect in a vertical bar chart. When several numeric result fields are selected, switch the chart among Match, WER, CER, First token, and Completion. Hover or focus a bar for the exact model, dialect, value, and scored utterance count.
+
+**First token** measures the time from sending the Realtime `response.create` event until the first non-empty streamed text delta arrives. It excludes local decoding, authentication, connection/session setup, and audio upload. **Completion** remains the full end-to-end duration from starting local processing through the complete transcript; it includes any rate-limit retry delay. First-token values are unavailable for adapters that return only a completed response and for runs created before this metric was added.
 
 The same chart is shown for ordinary runs with a single selected model, including runs limited to one dialect.
 
-The run-history overview aggregates all persisted runs into total runs, successful results versus all results, mean Match, and mean latency. Each individual history row includes its task completion ratio, Match, WER, mean latency, and a status-quality indicator. Indicators prioritize active/stopped/error states, then classify completed scored runs as **Strong match** ($\geq 85\%$), **Review** ($60\%-85\%$), or **Low match** ($< 60\%$).
+The run-history overview aggregates all persisted runs into total runs, successful results versus all results, mean Match, and mean completion time. Each individual history row follows the currently selected primary result field and includes its task completion ratio and a status-quality indicator. Indicators prioritize active/stopped/error states, then classify completed scored runs as **Strong match** ($\geq 85\%$), **Review** ($60\%-85\%$), or **Low match** ($< 60\%$).
 
 Open a historical run to use **Download CSV** for its full settings and result matrix, or **Use run setup** to restore its available models, clips, parameters, and prompt into the configuration workspace for a follow-up run.
 
-Every selected model and clip produces an independent result. A failed request is recorded with its error and latency, and does not stop the remainder of the matrix.
+Every selected model and clip produces an independent result. A failed request is recorded with its error and completion time, and does not stop the remainder of the matrix.
 
 ### Rate-limit resilience
 
-Model invocations retry only transient rate-limit failures (`429`, throttling, or Too Many Requests). Each operation makes up to four attempts using exponential backoff starting at 0.75 seconds with bounded jitter; service-provided `Retry-After` or `Retry-After-Ms` guidance takes precedence. The retry delay is included in the result latency so throughput constraints remain observable in benchmark results.
+Model invocations retry only transient rate-limit failures (`429`, throttling, or Too Many Requests). Each operation makes up to four attempts using exponential backoff starting at 0.75 seconds with bounded jitter; service-provided `Retry-After` or `Retry-After-Ms` guidance takes precedence. The retry delay is included in the result completion time so throughput constraints remain observable in benchmark results.
 
 ## Run Controls
 

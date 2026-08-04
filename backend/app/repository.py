@@ -60,6 +60,7 @@ class RunRepository:
                     word_error_rate REAL,
                     character_error_rate REAL,
                     latency_ms REAL,
+                    time_to_first_token_ms REAL,
                     conversation_json TEXT,
                     error TEXT
                 );
@@ -77,6 +78,9 @@ class RunRepository:
                 connection.execute(
                     "ALTER TABLE runs ADD COLUMN reference_mode TEXT NOT NULL DEFAULT 'dialect'"
                 )
+            result_columns = {row["name"] for row in connection.execute("PRAGMA table_info(results)")}
+            if "time_to_first_token_ms" not in result_columns:
+                connection.execute("ALTER TABLE results ADD COLUMN time_to_first_token_ms REAL")
             connection.commit()
 
     def list_instruction_presets(self) -> list[dict[str, str]]:
@@ -193,6 +197,7 @@ class RunRepository:
         word_error_rate: float | None,
         character_error_rate: float | None,
         latency_ms: float | None,
+        time_to_first_token_ms: float | None,
         conversation: list[dict[str, Any]] | None,
         error: str | None,
     ) -> None:
@@ -201,8 +206,9 @@ class RunRepository:
                 """
                 INSERT INTO results (
                     run_id, created_at, status, model_id, model_label, item_id, audio_path, transcript,
-                    reference_transcript, word_error_rate, character_error_rate, latency_ms, conversation_json, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reference_transcript, word_error_rate, character_error_rate, latency_ms,
+                    time_to_first_token_ms, conversation_json, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -217,6 +223,7 @@ class RunRepository:
                     word_error_rate,
                     character_error_rate,
                     latency_ms,
+                    time_to_first_token_ms,
                     json.dumps(conversation) if conversation is not None else None,
                     error,
                 ),
@@ -232,6 +239,7 @@ class RunRepository:
                       COALESCE(SUM(CASE WHEN results.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_result_count,
                        AVG(results.word_error_rate) AS average_word_error_rate,
                       AVG(results.latency_ms) AS average_latency_ms,
+                      AVG(results.time_to_first_token_ms) AS average_time_to_first_token_ms,
                        AVG(
                            CASE
                                WHEN results.word_error_rate IS NULL THEN NULL
@@ -261,7 +269,8 @@ class RunRepository:
                     (SELECT COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) FROM results) AS failed_result_count,
                     (SELECT AVG(word_error_rate) FROM results) AS average_word_error_rate,
                     (SELECT AVG(CASE WHEN word_error_rate IS NULL THEN NULL WHEN word_error_rate > 1 THEN 0 ELSE 1 - word_error_rate END) FROM results) AS average_word_match_rate,
-                    (SELECT AVG(latency_ms) FROM results) AS average_latency_ms
+                    (SELECT AVG(latency_ms) FROM results) AS average_latency_ms,
+                    (SELECT AVG(time_to_first_token_ms) FROM results) AS average_time_to_first_token_ms
                 """
             ).fetchone()
         summary = dict(row)
@@ -285,6 +294,9 @@ class RunRepository:
         result_payloads = [self._result_payload(result) for result in results]
         scored_results = [result for result in result_payloads if result["word_error_rate"] is not None]
         timed_results = [result for result in result_payloads if result["latency_ms"] is not None]
+        streaming_results = [
+            result for result in result_payloads if result["time_to_first_token_ms"] is not None
+        ]
         payload["results"] = result_payloads
         payload["result_count"] = len(result_payloads)
         payload["successful_result_count"] = sum(result["status"] == "completed" for result in result_payloads)
@@ -302,6 +314,11 @@ class RunRepository:
         payload["average_latency_ms"] = (
             sum(result["latency_ms"] for result in timed_results) / len(timed_results)
             if timed_results
+            else None
+        )
+        payload["average_time_to_first_token_ms"] = (
+            sum(result["time_to_first_token_ms"] for result in streaming_results) / len(streaming_results)
+            if streaming_results
             else None
         )
         payload["indicator"] = self._run_indicator(
@@ -346,6 +363,11 @@ class RunRepository:
             "average_word_match_rate": average_word_match_rate,
             "average_latency_ms": (
                 row["average_latency_ms"] if "average_latency_ms" in row.keys() else None
+            ),
+            "average_time_to_first_token_ms": (
+                row["average_time_to_first_token_ms"]
+                if "average_time_to_first_token_ms" in row.keys()
+                else None
             ),
         }
         payload["indicator"] = RunRepository._run_indicator(
@@ -420,6 +442,7 @@ class RunRepository:
             ),
             "character_error_rate": row["character_error_rate"],
             "latency_ms": row["latency_ms"],
+            "time_to_first_token_ms": row["time_to_first_token_ms"],
             "conversation": json.loads(row["conversation_json"]) if row["conversation_json"] else None,
             "error": row["error"],
         }

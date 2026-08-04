@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 import mimetypes
 import os
+import time
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -23,6 +24,7 @@ from .settings import BenchmarkSettings
 class TranscriptionResponse:
     transcript: str
     conversation: list[dict[str, Any]]
+    time_to_first_token_ms: float | None = None
 
 
 class AudioTranscriber(Protocol):
@@ -139,7 +141,7 @@ class RealtimeAudioTranscriber:
         credential = DefaultAzureCredential()
         try:
             token = (await credential.get_token(self._TOKEN_SCOPE)).token
-            transcript = await retry_rate_limited(
+            transcript, time_to_first_token_ms = await retry_rate_limited(
                 lambda: self._run_session(websocket_url, token, pcm_audio, prompt)
             )
         finally:
@@ -147,6 +149,7 @@ class RealtimeAudioTranscriber:
 
         return TranscriptionResponse(
             transcript=transcript.strip(),
+            time_to_first_token_ms=time_to_first_token_ms,
             conversation=[
                 {
                     "role": "user",
@@ -158,7 +161,9 @@ class RealtimeAudioTranscriber:
             ],
         )
 
-    async def _run_session(self, websocket_url: str, token: str, pcm_audio: bytes, prompt: str) -> str:
+    async def _run_session(
+        self, websocket_url: str, token: str, pcm_audio: bytes, prompt: str
+    ) -> tuple[str, float]:
         async with websockets.connect(
             websocket_url,
             additional_headers={"Authorization": f"Bearer {token}"},
@@ -196,6 +201,7 @@ class RealtimeAudioTranscriber:
                     )
                 )
             await socket.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            response_started = time.perf_counter()
             await socket.send(
                 json.dumps(
                     {
@@ -207,7 +213,7 @@ class RealtimeAudioTranscriber:
                     }
                 )
             )
-            return await self._collect_text_response(socket)
+            return await self._collect_text_response(socket, response_started)
 
     @staticmethod
     async def _receive_event(socket: Any, expected_type: str) -> dict[str, Any]:
@@ -219,24 +225,30 @@ class RealtimeAudioTranscriber:
         return event
 
     @staticmethod
-    async def _collect_text_response(socket: Any) -> str:
+    async def _collect_text_response(socket: Any, response_started: float) -> tuple[str, float]:
         transcript = ""
+        time_to_first_token_ms = None
         for _ in range(200):
             event = json.loads(await asyncio.wait_for(socket.recv(), timeout=45))
             event_type = event.get("type")
             if event_type in {"response.output_text.delta", "response.text.delta"}:
-                transcript += event.get("delta", "")
+                delta = event.get("delta", "")
+                if delta and time_to_first_token_ms is None:
+                    time_to_first_token_ms = (time.perf_counter() - response_started) * 1000
+                transcript += delta
                 continue
             if event_type == "error":
                 raise RuntimeError(event.get("error", {}).get("message", "Realtime API response error."))
             if event_type == "response.done":
                 if transcript:
-                    return transcript
+                    if time_to_first_token_ms is None:
+                        time_to_first_token_ms = (time.perf_counter() - response_started) * 1000
+                    return transcript, time_to_first_token_ms
                 for output_item in event.get("response", {}).get("output", []):
                     for content in output_item.get("content", []):
                         transcript += content.get("text") or content.get("transcript") or ""
                 if transcript:
-                    return transcript
+                    return transcript, (time.perf_counter() - response_started) * 1000
                 raise RuntimeError("Realtime API returned a response without text output.")
         raise RuntimeError("Realtime API response exceeded the expected event limit.")
 

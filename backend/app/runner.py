@@ -121,6 +121,7 @@ class BenchmarkRunner:
                             word_error_rate=scores.word_error_rate,
                             character_error_rate=scores.character_error_rate,
                             latency_ms=(time.perf_counter() - started) * 1000,
+                            time_to_first_token_ms=response.time_to_first_token_ms,
                             conversation=response.conversation,
                             error=None,
                         )
@@ -137,6 +138,7 @@ class BenchmarkRunner:
                             word_error_rate=None,
                             character_error_rate=None,
                             latency_ms=(time.perf_counter() - started) * 1000,
+                            time_to_first_token_ms=None,
                             conversation=None,
                             error=str(error),
                         )

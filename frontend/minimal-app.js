@@ -50,9 +50,13 @@ const metricDefinitions = {
     label: 'CER',
     description: 'Character Error Rate after normalization. Lower is better.',
   },
+  ttft: {
+    label: 'First token',
+    description: 'Realtime streaming time from the response request to the first non-empty text delta.',
+  },
   latency: {
-    label: 'Latency',
-    description: 'Time from submitting an utterance to receiving the completed transcript.',
+    label: 'Completion',
+    description: 'End-to-end time including decoding, authentication, connection setup, audio upload, and the completed transcript.',
   },
 }
 
@@ -75,9 +79,15 @@ const chartMetricDefinitions = {
     description: 'Lower bars indicate fewer character-level transcription errors.',
     kind: 'rate',
   },
+  ttft: {
+    property: 'time_to_first_token_ms',
+    title: 'Mean time to first token by dialect',
+    description: 'Lower bars indicate a faster first streamed text delta after the response request.',
+    kind: 'latency',
+  },
   latency: {
     property: 'latency_ms',
-    title: 'Mean latency by dialect',
+    title: 'Mean completion time by dialect',
     description: 'Lower bars indicate faster completed transcriptions.',
     kind: 'latency',
   },
@@ -368,6 +378,7 @@ function resultMetricValue(result, metric) {
   if (metric === 'match') return rate(result.word_match_rate)
   if (metric === 'wer') return rate(result.word_error_rate)
   if (metric === 'cer') return rate(result.character_error_rate)
+  if (metric === 'ttft') return latency(result.time_to_first_token_ms)
   return latency(result.latency_ms)
 }
 
@@ -405,6 +416,7 @@ function averageResultMetric(run, metric) {
     match: 'word_match_rate',
     wer: 'word_error_rate',
     cer: 'character_error_rate',
+    ttft: 'time_to_first_token_ms',
     latency: 'latency_ms',
   }[metric]
   const values = (run.results ?? []).map((result) => result[property]).filter((value) => value !== null && value !== undefined)
@@ -538,7 +550,7 @@ function activeRunPanel() {
         : ''
   const primaryMetric = metrics[0]
   const primaryAverage = primaryMetric ? averageResultMetric(run, primaryMetric) : null
-  const primaryValue = primaryMetric === 'latency' ? latency(primaryAverage) : rate(primaryAverage)
+  const primaryValue = ['ttft', 'latency'].includes(primaryMetric) ? latency(primaryAverage) : rate(primaryAverage)
   const metricSummary = primaryMetric ? `<div><span>Mean ${escapeHtml(metricDefinitions[primaryMetric].label)}</span><strong>${primaryValue}</strong></div>` : ''
   const progressPanel = isRunInProgress(run)
     ? `<div class="run-progress"><div><span>${progress.completed} of ${progress.total} complete</span><strong>${progress.percent}%</strong></div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}" aria-valuenow="${progress.completed}"><span style="width:${progress.percent}%"></span></div><div class="run-controls">${controls}</div></div>`
@@ -567,8 +579,8 @@ function historyRows() {
   return state.runs.slice(0, 6).map((run) => {
     const total = run.total_task_count ?? run.model_ids.length * run.item_ids.length
     const indicator = run.indicator ?? { label: run.status, tone: 'neutral' }
-    const value = preferredMetric === 'latency'
-      ? latency(run.average_latency_ms)
+    const value = ['ttft', 'latency'].includes(preferredMetric)
+      ? latency(preferredMetric === 'ttft' ? run.average_time_to_first_token_ms : run.average_latency_ms)
       : preferredMetric === 'wer'
         ? rate(run.average_word_error_rate)
         : preferredMetric === 'match'

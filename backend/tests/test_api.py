@@ -13,7 +13,7 @@ from backend.app.transcriber import TranscriptionResponse
 
 class FakeTranscriber:
     async def transcribe(self, model, item, parameters, prompt):
-        return TranscriptionResponse(transcript="grüezi", conversation=[])
+        return TranscriptionResponse(transcript="grüezi", conversation=[], time_to_first_token_ms=125)
 
 
 class ApiTests(unittest.TestCase):
@@ -97,12 +97,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(run["reference_mode"], "dialect")
         self.assertEqual(run["results"][0]["word_error_rate"], 0)
         self.assertEqual(run["results"][0]["word_match_rate"], 1)
+        self.assertEqual(run["results"][0]["time_to_first_token_ms"], 125)
+        self.assertEqual(run["average_time_to_first_token_ms"], 125)
         self.assertEqual(history_summary["total_run_count"], 1)
         self.assertEqual(history_summary["successful_result_count"], 1)
         self.assertEqual(history_summary["indicator"], {"label": "Strong overall", "tone": "positive"})
         self.assertEqual(export.status_code, 200)
         self.assertIn("text/csv", export.headers["content-type"])
         self.assertIn("reference_utterance", export.text)
+        self.assertIn("time_to_first_token_ms", export.text)
         self.assertIn("grüezi", export.text)
         self.assertEqual(high_german_run["reference_mode"], "standard-german")
         self.assertIn("High German", high_german_run["prompt"])

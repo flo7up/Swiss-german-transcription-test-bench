@@ -3,11 +3,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from backend.app.repository import RunRepository
 from backend.app.runner import BenchmarkRequest, BenchmarkRunner
 from backend.app.settings import BenchmarkSettings
-from backend.app.transcriber import TranscriptionResponse
+from backend.app.transcriber import RealtimeAudioTranscriber, TranscriptionResponse
 
 
 class FakeTranscriber:
@@ -15,6 +16,7 @@ class FakeTranscriber:
         return TranscriptionResponse(
             transcript="grüezi mitenand",
             conversation=[{"role": "assistant", "contents": ["grüezi mitenand"]}],
+            time_to_first_token_ms=125,
         )
 
 
@@ -51,6 +53,27 @@ class GatedTranscriber:
 
 
 class BenchmarkRunnerTests(unittest.TestCase):
+    def test_realtime_stream_records_first_non_empty_text_delta(self) -> None:
+        class EventSocket:
+            def __init__(self) -> None:
+                self.events = [
+                    {"type": "response.output_text.delta", "delta": ""},
+                    {"type": "response.output_text.delta", "delta": "grüezi"},
+                    {"type": "response.output_text.delta", "delta": " mitenand"},
+                    {"type": "response.done", "response": {}},
+                ]
+
+            async def recv(self) -> str:
+                return json.dumps(self.events.pop(0))
+
+        with patch("backend.app.transcriber.time.perf_counter", return_value=10.25):
+            transcript, time_to_first_token_ms = asyncio.run(
+                RealtimeAudioTranscriber._collect_text_response(EventSocket(), 10.0)
+            )
+
+        self.assertEqual(transcript, "grüezi mitenand")
+        self.assertEqual(time_to_first_token_ms, 250)
+
     def test_scores_against_selected_high_german_reference(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:
             root = Path(temp_directory)
@@ -212,6 +235,8 @@ class BenchmarkRunnerTests(unittest.TestCase):
         self.assertEqual(completed_run["results"][0]["word_error_rate"], 0)
         self.assertEqual(completed_run["results"][0]["word_match_rate"], 1)
         self.assertEqual(completed_run["average_word_match_rate"], 1)
+        self.assertEqual(completed_run["results"][0]["time_to_first_token_ms"], 125)
+        self.assertEqual(completed_run["average_time_to_first_token_ms"], 125)
         self.assertEqual(completed_run["total_task_count"], 1)
         self.assertEqual(completed_run["successful_result_count"], 1)
         self.assertEqual(completed_run["failed_result_count"], 0)
