@@ -290,7 +290,7 @@ main {
 
 .sample-controls {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) 84px auto;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1fr) 84px auto;
   align-items: end;
   gap: 8px;
   margin-bottom: 16px;
@@ -792,6 +792,42 @@ main {
   color: var(--cp-text-muted);
   font-size: 11px;
   line-height: 1.4;
+}
+
+.chart-heading-actions {
+  display: grid;
+  justify-items: end;
+  gap: 10px;
+}
+
+.chart-metric-switch {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--cp-border);
+  border-radius: 6px;
+  background: var(--cp-panel);
+}
+
+.chart-metric-switch button {
+  min-width: 46px;
+  padding: 5px 8px;
+  color: var(--cp-text-muted);
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.chart-metric-switch button:hover {
+  color: var(--cp-text);
+}
+
+.chart-metric-switch button.active {
+  color: var(--cp-panel-strong);
+  background: var(--cp-text);
 }
 
 .chart-legend {
@@ -1320,6 +1356,10 @@ tr:last-child td {
 
   .chart-legend {
     justify-content: flex-start;
+  }
+
+  .chart-heading-actions {
+    justify-items: start;
   }
 
   .history-row {

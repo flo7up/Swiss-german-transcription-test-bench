@@ -32,6 +32,7 @@ class ApiTests(unittest.TestCase):
                         "id": "clip-a",
                         "audio_path": "clips/clip.mp3",
                         "reference_transcript": "grüezi",
+                        "standard_german_transcript": "guten tag",
                         "source": "SwissDial",
                     }
                 )
@@ -81,8 +82,19 @@ class ApiTests(unittest.TestCase):
                 run = client.get(f"/api/runs/{response.json()['id']}").json()
                 history_summary = client.get("/api/runs/summary").json()
                 export = client.get(f"/api/runs/{response.json()['id']}/export.csv")
+                high_german_response = client.post(
+                    "/api/runs",
+                    json={
+                        "model_ids": ["model-a"],
+                        "item_ids": ["clip-a"],
+                        "reference_mode": "standard-german",
+                    },
+                )
+                self.assertEqual(high_german_response.status_code, 202)
+                high_german_run = client.get(f"/api/runs/{high_german_response.json()['id']}").json()
 
         self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["reference_mode"], "dialect")
         self.assertEqual(run["results"][0]["word_error_rate"], 0)
         self.assertEqual(run["results"][0]["word_match_rate"], 1)
         self.assertEqual(history_summary["total_run_count"], 1)
@@ -92,6 +104,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn("text/csv", export.headers["content-type"])
         self.assertIn("reference_utterance", export.text)
         self.assertIn("grüezi", export.text)
+        self.assertEqual(high_german_run["reference_mode"], "standard-german")
+        self.assertIn("High German", high_german_run["prompt"])
+        self.assertEqual(high_german_run["results"][0]["reference_transcript"], "guten tag")
 
     def test_rejects_unknown_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:

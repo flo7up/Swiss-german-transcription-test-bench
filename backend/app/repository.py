@@ -43,6 +43,7 @@ class RunRepository:
                     item_ids_json TEXT NOT NULL,
                     parameters_json TEXT NOT NULL,
                     prompt TEXT NOT NULL,
+                    reference_mode TEXT NOT NULL DEFAULT 'dialect',
                     error TEXT
                 );
                 CREATE TABLE IF NOT EXISTS results (
@@ -71,6 +72,11 @@ class RunRepository:
                 );
                 """
             )
+            run_columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
+            if "reference_mode" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN reference_mode TEXT NOT NULL DEFAULT 'dialect'"
+                )
             connection.commit()
 
     def list_instruction_presets(self) -> list[dict[str, str]]:
@@ -110,15 +116,25 @@ class RunRepository:
         item_ids: list[str],
         parameters: dict[str, dict[str, Any]],
         prompt: str,
+        reference_mode: str,
     ) -> str:
         run_id = str(uuid.uuid4())
         with closing(self._connection()) as connection:
             connection.execute(
                 """
-                INSERT INTO runs (id, status, started_at, model_ids_json, item_ids_json, parameters_json, prompt)
-                VALUES (?, 'queued', ?, ?, ?, ?, ?)
+                INSERT INTO runs (
+                    id, status, started_at, model_ids_json, item_ids_json, parameters_json, prompt, reference_mode
+                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, _timestamp(), json.dumps(model_ids), json.dumps(item_ids), json.dumps(parameters), prompt),
+                (
+                    run_id,
+                    _timestamp(),
+                    json.dumps(model_ids),
+                    json.dumps(item_ids),
+                    json.dumps(parameters),
+                    prompt,
+                    reference_mode,
+                ),
             )
             connection.commit()
         return run_id
@@ -316,6 +332,7 @@ class RunRepository:
             "item_ids": item_ids,
             "parameters": json.loads(row["parameters_json"]),
             "prompt": row["prompt"],
+            "reference_mode": row["reference_mode"],
             "error": row["error"],
             "result_count": result_count,
             "total_task_count": total_task_count,

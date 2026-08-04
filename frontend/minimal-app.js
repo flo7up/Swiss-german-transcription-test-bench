@@ -1,8 +1,10 @@
 const app = document.querySelector('#app')
 const apiBase = new URLSearchParams(location.search).get('api') ?? ''
 const defaultPrompt = 'Transcribe this recording in Swiss German. Return only the spoken words, without translating them.'
+const highGermanPrompt = 'Transcribe this recording into High German. Return only the spoken words, without explanation.'
 const dialectComparisonModelIds = ['openai-realtime-2', 'openai-realtime-2-1']
 const dialectComparisonClipsPerDialect = 2
+let sampleSizeTimer = null
 
 const state = {
   models: [],
@@ -15,7 +17,9 @@ const state = {
   selectedModelIds: [],
   selectedItemIds: [],
   selectedDialect: 'all',
+  referenceMode: 'dialect',
   selectedMetrics: ['validation', 'match'],
+  chartMetric: 'match',
   sampleSize: 16,
   sampleRound: 0,
   itemLimit: 5,
@@ -49,6 +53,33 @@ const metricDefinitions = {
   latency: {
     label: 'Latency',
     description: 'Time from submitting an utterance to receiving the completed transcript.',
+  },
+}
+
+const chartMetricDefinitions = {
+  match: {
+    property: 'word_match_rate',
+    title: 'Mean word match by dialect',
+    description: 'Higher bars indicate closer transcription to the matching Swiss German reference.',
+    kind: 'rate',
+  },
+  wer: {
+    property: 'word_error_rate',
+    title: 'Mean WER by dialect',
+    description: 'Lower bars indicate fewer word-level transcription errors.',
+    kind: 'rate',
+  },
+  cer: {
+    property: 'character_error_rate',
+    title: 'Mean CER by dialect',
+    description: 'Lower bars indicate fewer character-level transcription errors.',
+    kind: 'rate',
+  },
+  latency: {
+    property: 'latency_ms',
+    title: 'Mean latency by dialect',
+    description: 'Lower bars indicate faster completed transcriptions.',
+    kind: 'latency',
   },
 }
 
@@ -120,6 +151,19 @@ function itemById(itemId) {
   return state.items.find((item) => item.id === itemId)
 }
 
+function referenceModeLabel(mode = state.referenceMode) {
+  return mode === 'standard-german' ? 'High German' : 'Matching Swiss German'
+}
+
+function itemReference(item, mode = state.referenceMode) {
+  if (mode === 'standard-german') return item?.metadata?.standard_german_transcript ?? null
+  return item?.reference_transcript ?? null
+}
+
+function itemCanRun(item) {
+  return Boolean(item?.audio_available && (state.referenceMode !== 'standard-german' || itemReference(item)))
+}
+
 function availableDialects() {
   const dialects = new Map()
   for (const item of state.items) {
@@ -135,10 +179,26 @@ function filteredItems() {
     : state.items.filter((item) => itemDialect(item) === state.selectedDialect)
 }
 
+function sampleCapacity() {
+  return Math.min(20, filteredItems().filter(itemCanRun).length)
+}
+
+function updateSampleSize(value) {
+  const requested = Math.floor(Number(value))
+  const capacity = sampleCapacity()
+  if (!Number.isFinite(requested) || requested < 1 || !capacity) return
+  state.sampleSize = Math.min(requested, capacity)
+  selectSample()
+  if (requested > capacity) {
+    state.message = `Sample limited to ${capacity} available utterance${capacity === 1 ? '' : 's'}`
+  }
+  render()
+}
+
 function selectSample(advance = false) {
   if (advance) state.sampleRound += 1
   const groups = new Map()
-  for (const item of filteredItems().filter((candidate) => candidate.audio_available)) {
+  for (const item of filteredItems().filter(itemCanRun)) {
     const dialect = itemDialect(item) || 'other'
     if (!groups.has(dialect)) groups.set(dialect, [])
     groups.get(dialect).push(item)
@@ -169,7 +229,7 @@ function dialectComparisonModels() {
 
 function dialectComparisonItems() {
   const groups = new Map()
-  for (const item of state.items.filter((candidate) => candidate.audio_available && itemDialect(candidate))) {
+  for (const item of state.items.filter((candidate) => itemCanRun(candidate) && itemDialect(candidate))) {
     const dialect = itemDialect(item)
     if (!groups.has(dialect)) groups.set(dialect, [])
     groups.get(dialect).push(item)
@@ -213,9 +273,11 @@ function sampleControls() {
   const dialectOptions = availableDialects().map(([code, name]) => (
     `<option value="${escapeHtml(code)}" ${state.selectedDialect === code ? 'selected' : ''}>${escapeHtml(name)}</option>`
   )).join('')
+  const capacity = sampleCapacity()
   return `<div class="sample-controls">
-    <label><span>Dialect</span><select data-dialect-filter><option value="all" ${state.selectedDialect === 'all' ? 'selected' : ''}>All dialects</option>${dialectOptions}</select></label>
-    <label class="sample-size"><span>Sample</span><input data-sample-size type="number" min="1" max="20" step="1" value="${state.sampleSize}"></label>
+    <label><span>Audio dialect</span><select data-dialect-filter><option value="all" ${state.selectedDialect === 'all' ? 'selected' : ''}>All dialects</option>${dialectOptions}</select></label>
+    <label><span>Evaluation reference</span><select data-reference-mode><option value="dialect" ${state.referenceMode === 'dialect' ? 'selected' : ''}>Matching Swiss German</option><option value="standard-german" ${state.referenceMode === 'standard-german' ? 'selected' : ''}>High German</option></select></label>
+    <label class="sample-size"><span>Sample</span><input data-sample-size type="number" min="1" max="${Math.max(1, capacity)}" step="1" value="${Math.min(state.sampleSize, Math.max(1, capacity))}" ${capacity ? '' : 'disabled'}></label>
     <button type="button" class="secondary-button" data-action="resample-items">New sample</button>
   </div>`
 }
@@ -231,13 +293,15 @@ function utteranceRows() {
 
   const rows = visibleItems.slice(0, state.itemLimit).map((item) => {
     const selected = state.selectedItemIds.includes(item.id)
-    const utterance = item.reference_transcript || 'Reference transcript unavailable'
+    const reference = itemReference(item)
+    const selectable = itemCanRun(item)
+    const utterance = reference || `${referenceModeLabel()} reference unavailable`
     const audioUrl = `${apiBase}/api/dataset/items/${encodeURIComponent(item.id)}/audio`
     const topic = item.metadata?.topic ? `<span>${escapeHtml(item.metadata.topic)}</span>` : ''
-    return `<article class="utterance-row ${selected ? 'selected' : ''} ${item.audio_available ? '' : 'unavailable'}">
+    return `<article class="utterance-row ${selected ? 'selected' : ''} ${selectable ? '' : 'unavailable'}">
       <label class="utterance-select">
-        <input type="checkbox" data-item-id="${escapeHtml(item.id)}" ${selected ? 'checked' : ''} ${item.audio_available ? '' : 'disabled'}>
-        <span class="utterance-copy"><strong>${escapeHtml(utterance)}</strong><small><span>${escapeHtml(itemDialectName(item))}</span>${topic}</small></span>
+        <input type="checkbox" data-item-id="${escapeHtml(item.id)}" ${selected ? 'checked' : ''} ${selectable ? '' : 'disabled'}>
+        <span class="utterance-copy"><strong>${escapeHtml(utterance)}</strong><small><span>${escapeHtml(itemDialectName(item))}</span><span>${escapeHtml(referenceModeLabel())} reference</span>${topic}</small></span>
       </label>
       ${item.audio_available ? `<audio controls preload="metadata" src="${escapeHtml(audioUrl)}">Audio playback is not supported by this browser.</audio>` : '<span class="missing-audio">Audio unavailable</span>'}
     </article>`
@@ -342,6 +406,20 @@ function averageResultMetric(run, metric) {
   return values.reduce((total, value) => total + value, 0) / values.length
 }
 
+function niceChartMaximum(value) {
+  if (value <= 0) return 1
+  const magnitude = 10 ** Math.floor(Math.log10(value))
+  const normalized = value / magnitude
+  const rounded = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 2.5 ? 2.5 : normalized <= 5 ? 5 : 10
+  return rounded * magnitude
+}
+
+function chartValue(value, kind, compact = false) {
+  if (kind === 'rate') return `${(value * 100).toFixed(compact ? 0 : 1)}%`
+  if (compact && value >= 1000) return `${(value / 1000).toFixed(value % 1000 ? 1 : 0)}s`
+  return `${Math.round(value)} ms`
+}
+
 function dialectComparisonChart(run) {
   const models = run.model_ids
     .map((modelId) => state.models.find((model) => model.id === modelId))
@@ -349,28 +427,55 @@ function dialectComparisonChart(run) {
   const dialects = [...new Map(run.item_ids.map((itemId) => itemById(itemId)).filter(Boolean).map((item) => [itemDialect(item), itemDialectName(item)]))]
     .filter(([dialect]) => dialect)
     .sort(([left], [right]) => left.localeCompare(right))
-  if (models.length < 2 || dialects.length < 2) return ''
+  const availableMetrics = selectedResultMetrics().filter((metric) => chartMetricDefinitions[metric])
+  if (models.length < 2 || dialects.length < 2 || !availableMetrics.length) return ''
 
-  const legend = models.map((model, index) => `<span><i class="series-${index % 2}"></i>${escapeHtml(model.label)}</span>`).join('')
-  const groups = dialects.map(([dialect, dialectName]) => {
-    const bars = models.map((model, index) => {
+  const metric = availableMetrics.includes(state.chartMetric) ? state.chartMetric : availableMetrics[0]
+  const definition = chartMetricDefinitions[metric]
+  const chartDescription = metric === 'match'
+    ? `Higher bars indicate closer transcription to the ${referenceModeLabel(run.reference_mode)} reference.`
+    : definition.description
+  const series = dialects.map(([dialect, dialectName]) => ({
+    dialect,
+    dialectName,
+    models: models.map((model) => {
       const values = (run.results ?? [])
         .filter((result) => result.model_id === model.id && itemDialect(itemById(result.item_id)) === dialect)
-        .map((result) => result.word_match_rate)
-        .filter((value) => value !== null && value !== undefined)
-      const average = values.length ? values.reduce((total, value) => total + value, 0) / values.length : null
-      const height = average === null ? 0 : Math.max(0, Math.min(100, average * 100))
-      const valueLabel = average === null ? (isRunInProgress(run) ? 'Pending' : 'No score') : `${(average * 100).toFixed(1)}%`
-      const accessibleLabel = `${model.label}, ${dialectName}: ${valueLabel}${values.length ? ` across ${values.length} utterances` : ''}`
+        .map((result) => result[definition.property])
+        .filter((value) => Number.isFinite(value))
+      return {
+        model,
+        values,
+        average: values.length ? values.reduce((total, value) => total + value, 0) / values.length : null,
+      }
+    }),
+  }))
+  const observedValues = series.flatMap((group) => group.models.map((entry) => entry.average).filter((value) => value !== null))
+  const scaleMaximum = definition.kind === 'rate'
+    ? niceChartMaximum(Math.max(1, ...observedValues))
+    : niceChartMaximum(Math.max(1000, ...observedValues))
+  const scaleLabels = [1, 0.75, 0.5, 0.25, 0]
+    .map((position) => `<span>${chartValue(scaleMaximum * position, definition.kind, true)}</span>`)
+    .join('')
+
+  const legend = models.map((model, index) => `<span><i class="series-${index % 2}"></i>${escapeHtml(model.label)}</span>`).join('')
+  const metricControls = availableMetrics.length > 1
+    ? `<div class="chart-metric-switch" role="group" aria-label="Chart metric">${availableMetrics.map((key) => `<button type="button" data-chart-metric="${key}" aria-pressed="${metric === key}" class="${metric === key ? 'active' : ''}">${escapeHtml(metricDefinitions[key].label)}</button>`).join('')}</div>`
+    : ''
+  const groups = series.map(({ dialect, dialectName, models: modelSeries }) => {
+    const bars = modelSeries.map(({ model, values, average }, index) => {
+      const height = average === null ? 0 : Math.max(0, Math.min(100, average / scaleMaximum * 100))
+      const valueLabel = average === null ? (isRunInProgress(run) ? 'Pending' : 'No score') : chartValue(average, definition.kind)
+      const accessibleLabel = `${model.label}, ${dialectName}, ${metricDefinitions[metric].label}: ${valueLabel}${values.length ? ` across ${values.length} utterances` : ''}`
       return `<span class="chart-bar series-${index % 2} ${average === null ? 'pending' : ''}" tabindex="0" role="img" aria-label="${escapeHtml(accessibleLabel)}"><i class="chart-bar-fill" style="--bar-height:${height}%"></i><span class="chart-tooltip">${escapeHtml(model.label)}<strong>${escapeHtml(valueLabel)}</strong><small>${values.length ? `${values.length} utterances` : 'Waiting for results'}</small></span></span>`
     }).join('')
     return `<div class="chart-group"><div class="chart-bars">${bars}</div><span title="${escapeHtml(dialectName)}">${escapeHtml(dialect)}</span></div>`
   }).join('')
 
   return `<section class="dialect-chart" aria-labelledby="dialect-chart-title">
-    <div class="dialect-chart-heading"><div><span>Dialect comparison</span><h3 id="dialect-chart-title">Mean word match by dialect</h3><p>Higher bars indicate closer transcription to the matching Swiss German reference.</p></div><div class="chart-legend">${legend}</div></div>
+    <div class="dialect-chart-heading"><div><span>Dialect comparison</span><h3 id="dialect-chart-title">${escapeHtml(definition.title)}</h3><p>${escapeHtml(chartDescription)}</p></div><div class="chart-heading-actions">${metricControls}<div class="chart-legend">${legend}</div></div></div>
     <div class="chart-scroll"><div class="chart-canvas">
-      <div class="chart-scale" aria-hidden="true"><span>100%</span><span>75%</span><span>50%</span><span>25%</span><span>0%</span></div>
+      <div class="chart-scale" aria-hidden="true">${scaleLabels}</div>
       <div class="chart-grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
       <div class="chart-groups" style="--dialect-count:${dialects.length}">${groups}</div>
     </div></div>
@@ -406,9 +511,11 @@ function activeRunPanel() {
     ? `<div class="result-actions"><button type="button" class="secondary-button" data-action="reuse-run">Use this setup</button><a class="secondary-button" href="${apiBase}/api/runs/${encodeURIComponent(run.id)}/export.csv" download>Download CSV</a></div>`
     : ''
   const comparisonChart = dialectComparisonChart(run)
+    const runReferenceMode = run.reference_mode ?? 'dialect'
   return `<div class="result-summary">
       <div><span>Status</span><strong class="status-value ${escapeHtml(run.status)}">${escapeHtml(run.status)}</strong></div>
       <div><span>Completed</span><strong>${progress.completed} / ${progress.total}</strong></div>
+      <div><span>Reference</span><strong>${escapeHtml(referenceModeLabel(runReferenceMode))}</strong></div>
       ${metricSummary}
     </div>
     ${progressPanel}${comparisonChart}${resultActions}
@@ -557,6 +664,7 @@ async function startRun() {
         item_ids: state.selectedItemIds,
         parameter_overrides: parameterOverrides,
         prompt: state.prompt,
+        reference_mode: state.referenceMode,
       }),
     })
     state.activeRun = await api(`/api/runs/${queued.id}`)
@@ -641,6 +749,7 @@ function reuseActiveRun() {
   const availableModelIds = new Set(state.models.map((model) => model.id))
   const availableItemIds = new Set(state.items.filter((item) => item.audio_available).map((item) => item.id))
   state.selectedModelIds = state.activeRun.model_ids.filter((modelId) => availableModelIds.has(modelId))
+  state.referenceMode = state.activeRun.reference_mode ?? 'dialect'
   state.selectedItemIds = state.activeRun.item_ids.filter((itemId) => availableItemIds.has(itemId))
   state.parameterOverrides = { ...state.parameterOverrides, ...state.activeRun.parameters }
   state.prompt = state.activeRun.prompt
@@ -671,9 +780,13 @@ async function toggleResultAudio(button) {
 }
 
 app.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-action], [data-run-id], [data-metric-info]')
+  const button = event.target.closest('[data-action], [data-run-id], [data-metric-info], [data-chart-metric]')
   if (!button) return
   if (button.dataset.runId) void openRun(button.dataset.runId)
+  if (button.dataset.chartMetric) {
+    state.chartMetric = button.dataset.chartMetric
+    render()
+  }
   if (button.dataset.metricInfo) {
     state.metricInfoOpen = state.metricInfoOpen === button.dataset.metricInfo ? null : button.dataset.metricInfo
     render()
@@ -694,6 +807,13 @@ app.addEventListener('click', (event) => {
   if (button.dataset.action === 'save-instruction') void saveInstructionPreset()
 })
 
+app.addEventListener('input', (event) => {
+  const target = event.target
+  if (!target.matches('[data-sample-size]') || target.value === '') return
+  window.clearTimeout(sampleSizeTimer)
+  sampleSizeTimer = window.setTimeout(() => updateSampleSize(target.value), 250)
+})
+
 app.addEventListener('change', (event) => {
   const target = event.target
   if (target.matches('[data-model-id]')) {
@@ -712,6 +832,8 @@ app.addEventListener('change', (event) => {
     state.selectedMetrics = target.checked
       ? [...state.selectedMetrics, target.dataset.metricId]
       : state.selectedMetrics.filter((metric) => metric !== target.dataset.metricId)
+    if (target.checked && chartMetricDefinitions[target.dataset.metricId]) state.chartMetric = target.dataset.metricId
+    if (!state.selectedMetrics.includes(state.chartMetric)) state.chartMetric = selectedResultMetrics()[0] ?? 'match'
     render()
   }
   if (target.matches('[data-dialect-filter]')) {
@@ -721,10 +843,21 @@ app.addEventListener('change', (event) => {
     selectSample()
     render()
   }
-  if (target.matches('[data-sample-size]')) {
-    state.sampleSize = Math.max(1, Math.min(20, Number(target.value) || 1))
+  if (target.matches('[data-reference-mode]')) {
+    const previousMode = state.referenceMode
+    state.referenceMode = target.value
+    if (state.prompt === defaultPrompt || state.prompt === highGermanPrompt) {
+      state.prompt = state.referenceMode === 'standard-german' ? highGermanPrompt : defaultPrompt
+    }
+    state.sampleRound = 0
     selectSample()
+    state.message = `${referenceModeLabel()} selected for display and scoring`
+    if (previousMode !== state.referenceMode) state.itemLimit = 5
     render()
+  }
+  if (target.matches('[data-sample-size]')) {
+    window.clearTimeout(sampleSizeTimer)
+    updateSampleSize(target.value || 1)
   }
   if (target.matches('[data-parameter-model]')) {
     const model = target.dataset.parameterModel

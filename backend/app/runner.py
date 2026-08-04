@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .catalog import load_dataset_items, load_models
-from .domain import ModelDefinition
+from .domain import DatasetItem, ModelDefinition
 from .metrics import score_transcript
 from .repository import RunRepository
 from .settings import BenchmarkSettings
@@ -18,7 +18,11 @@ from .transcriber import AudioTranscriber
 DEFAULT_TRANSCRIPTION_PROMPT = (
     "Transcribe this recording in Swiss German. Return only the spoken words, without translating them."
 )
+HIGH_GERMAN_TRANSCRIPTION_PROMPT = (
+    "Transcribe this recording into High German. Return only the spoken words, without explanation."
+)
 RUN_CONTROL_POLL_SECONDS = 0.1
+REFERENCE_MODES = {"dialect", "standard-german"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ class BenchmarkRequest:
     item_ids: list[str]
     parameter_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     prompt: str = DEFAULT_TRANSCRIPTION_PROMPT
+    reference_mode: str = "dialect"
 
 
 class BenchmarkRunner:
@@ -51,16 +56,32 @@ class BenchmarkRunner:
             raise ValueError(f"Unknown dataset item IDs: {', '.join(missing_items)}")
         if not request.model_ids or not request.item_ids:
             raise ValueError("Select at least one model and one audio item.")
+        if request.reference_mode not in REFERENCE_MODES:
+            raise ValueError(f"Unsupported reference mode: {request.reference_mode}")
+        if request.reference_mode == "standard-german":
+            missing_references = sorted(
+                item_id
+                for item_id in request.item_ids
+                if not items[item_id].metadata.get("standard_german_transcript")
+            )
+            if missing_references:
+                raise ValueError(
+                    f"High German references are unavailable for: {', '.join(missing_references)}"
+                )
 
         resolved_parameters = {
             model_id: self._resolve_parameters(models[model_id], request.parameter_overrides.get(model_id, {}))
             for model_id in request.model_ids
         }
+        prompt = request.prompt.strip()
+        if request.reference_mode == "standard-german" and (not prompt or prompt == DEFAULT_TRANSCRIPTION_PROMPT):
+            prompt = HIGH_GERMAN_TRANSCRIPTION_PROMPT
         return self.repository.create_run(
             model_ids=request.model_ids,
             item_ids=request.item_ids,
             parameters=resolved_parameters,
-            prompt=request.prompt.strip() or DEFAULT_TRANSCRIPTION_PROMPT,
+            prompt=prompt or DEFAULT_TRANSCRIPTION_PROMPT,
+            reference_mode=request.reference_mode,
         )
 
     async def execute_run(self, run_id: str) -> None:
@@ -82,11 +103,12 @@ class BenchmarkRunner:
                     if not await self._await_run_permission(run_id):
                         return
                     item = items[item_id]
+                    reference_transcript = self._reference_for_item(item, run["reference_mode"])
                     started = time.perf_counter()
                     try:
-                        prompt = self._prompt_for_item(run["prompt"], item.metadata)
+                        prompt = self._prompt_for_item(run["prompt"], item.metadata, run["reference_mode"])
                         response = await self.transcriber.transcribe(model, item, parameters, prompt)
-                        scores = score_transcript(item.reference_transcript, response.transcript)
+                        scores = score_transcript(reference_transcript, response.transcript)
                         self.repository.add_result(
                             run_id=run_id,
                             status="completed",
@@ -95,7 +117,7 @@ class BenchmarkRunner:
                             item_id=item.id,
                             audio_path=str(item.audio_path),
                             transcript=response.transcript,
-                            reference_transcript=item.reference_transcript,
+                            reference_transcript=reference_transcript,
                             word_error_rate=scores.word_error_rate,
                             character_error_rate=scores.character_error_rate,
                             latency_ms=(time.perf_counter() - started) * 1000,
@@ -111,7 +133,7 @@ class BenchmarkRunner:
                             item_id=item.id,
                             audio_path=str(item.audio_path),
                             transcript=None,
-                            reference_transcript=item.reference_transcript,
+                            reference_transcript=reference_transcript,
                             word_error_rate=None,
                             character_error_rate=None,
                             latency_ms=(time.perf_counter() - started) * 1000,
@@ -144,16 +166,27 @@ class BenchmarkRunner:
             raise ValueError(f"Unexpected run status: {status}")
 
     @staticmethod
-    def _prompt_for_item(prompt: str, metadata: dict[str, str]) -> str:
+    def _prompt_for_item(prompt: str, metadata: dict[str, str], reference_mode: str = "dialect") -> str:
         dialect_name = metadata.get("dialect_name")
         dialect_code = metadata.get("dialect")
-        if not dialect_name and not dialect_code:
-            return prompt
-
         dialect = dialect_name or dialect_code
         if dialect_name and dialect_code:
             dialect = f"{dialect_name} ({dialect_code.upper()})"
+        if reference_mode == "standard-german":
+            recording_context = f"The recording uses {dialect}. " if dialect else ""
+            return (
+                f"{prompt.rstrip()}\n{recording_context}Return only a High German (Standard German) transcript, "
+                "translating dialectal wording when needed."
+            )
+        if not dialect:
+            return prompt
         return f"{prompt.rstrip()}\nThe recording uses {dialect}. Preserve this dialect in the transcription."
+
+    @staticmethod
+    def _reference_for_item(item: DatasetItem, reference_mode: str) -> str | None:
+        if reference_mode == "standard-german":
+            return item.metadata.get("standard_german_transcript")
+        return item.reference_transcript
 
     @staticmethod
     def _resolve_parameters(model: ModelDefinition, overrides: dict[str, Any]) -> dict[str, Any]:

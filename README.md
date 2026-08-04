@@ -17,6 +17,7 @@ The backend uses the Python [Microsoft Agent Framework](https://learn.microsoft.
 - Reads editable Microsoft Foundry deployment definitions from `config/models.json`.
 - Imports a balanced sample from the official extracted ETH SwissDial 1.1 dataset into an ignored `data/swissdial` runtime directory. Legacy TSV ZIP exports remain supported.
 - Streams each imported test clip locally in the browser beside its reference utterance.
+- Separates the recording dialect filter from the evaluation reference, allowing scoring against the matching Swiss German transcript or its High German parallel text.
 - Lets evaluators choose any model-by-clip matrix and deployment-specific parameters.
 - Runs a one-click Realtime 2 versus Realtime 2.1 comparison across every available dialect, using up to two utterances per dialect.
 - Sends audio using Microsoft Agent Framework `Content.from_data(...)` through `FoundryChatClient`, adding the known dialect to each clip's transcription instruction.
@@ -56,7 +57,7 @@ scripts/           SwissDial archive importer
 
 The test bench uses **RBAC authentication only**. It does not read or require `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, or a Foundry key. Locally, `DefaultAzureCredential` uses the signed-in Azure CLI identity; when hosted, it should use the workload's managed identity. Grant that principal the appropriate Foundry/Azure OpenAI data-plane role before running a benchmark.
 
-The repository does not include ETH SwissDial media. SwissDial 1.1 is licensed by ETH Zurich under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). Confirm that your use is noncommercial and complies with its attribution and other terms before importing, running, publishing results, or sharing derived transcripts.
+The repository does not include ETH SwissDial media. Download [SwissDial 1.1 from ETH Zurich](https://mtc.ethz.ch/publications/open-source/swiss-dial.html). The dataset is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). Confirm that your use is noncommercial and complies with its attribution and other terms before importing, running, publishing results, or sharing derived transcripts.
 
 ## Quick Start
 
@@ -75,7 +76,7 @@ The repository does not include ETH SwissDial media. SwissDial 1.1 is licensed b
 
   Edit each `deployment` value in `config/models.json` so it exactly matches a deployment in your Azure resource. The checked-in registry contains Realtime 2 and Realtime 2.1 entries as configuration examples; it does not provision those deployments.
 
-3. Import the extracted official SwissDial 1.1 directory. The default is a deterministic 16-clip sample balanced across all eight dialects.
+3. Download and extract [SwissDial 1.1](https://mtc.ethz.ch/publications/open-source/swiss-dial.html), then import its directory. The default is a deterministic 16-clip sample balanced across all eight dialects.
 
    ```powershell
   ./.venv/Scripts/python.exe scripts/import_swissdial_archive.py "C:\path\to\data1.1"
@@ -142,9 +143,11 @@ The importer generates JSON Lines records like this:
 
 Before scoring, text is Unicode-normalized, lowercased, stripped of punctuation, and whitespace-collapsed while preserving characters such as `ä`, `ö`, and `ü`. WER is token-level Levenshtein distance divided by reference word count; CER uses the same distance over normalized characters. A clip without a reference transcript receives no WER or CER rather than an invented score.
 
+Use **Audio dialect** to choose recordings from one canton or all available dialects. Use **Evaluation reference** independently to score model output against either the matching Swiss German dialect transcript or the High German parallel transcript. Selecting High German also changes the untouched default prompt to request High German output; custom prompts remain unchanged. Runs persist this choice and include it in CSV exports.
+
 The UI also exposes **Word Match**, calculated as $\max(0, 1 - \text{WER})$. It gives a direct percentage where $100\%$ means the normalized word sequence exactly matched the reference. It is not a semantic similarity score: dialectal paraphrases or alternate spellings can still lower the value. Each row keeps the true reference utterance next to the actual model response so the score can be inspected in context.
 
-Use **Compare all dialects** in the model panel to select both Realtime deployments and queue a balanced 32-test run over the default 16-utterance corpus. While results arrive, the run view groups mean Word Match by dialect in a vertical bar chart. Hover or focus a bar for the exact model, dialect, score, and scored utterance count.
+Use **Compare all dialects** in the model panel to select both Realtime deployments and queue a balanced 32-test run over the default 16-utterance corpus. While results arrive, the run view groups the active selected metric by dialect in a vertical bar chart. When several numeric result fields are selected, switch the chart among Match, WER, CER, and latency. Hover or focus a bar for the exact model, dialect, value, and scored utterance count.
 
 The run-history overview aggregates all persisted runs into total runs, successful results versus all results, mean Match, and mean latency. Each individual history row includes its task completion ratio, Match, WER, mean latency, and a status-quality indicator. Indicators prioritize active/stopped/error states, then classify completed scored runs as **Strong match** ($\geq 85\%$), **Review** ($60\%-85\%$), or **Low match** ($< 60\%$).
 
@@ -169,7 +172,7 @@ While a benchmark is active, the primary Run button is locked and the active-run
 | `GET /api/instructions` | List named saved instruction presets |
 | `POST /api/instructions` | Create or update a named instruction preset |
 | `GET /api/dataset/items` | Import-discovered audio clips |
-| `POST /api/runs` | Queue a model-by-clip benchmark matrix |
+| `POST /api/runs` | Queue a model-by-clip matrix with `reference_mode` set to `dialect` or `standard-german` |
 | `GET /api/runs` | List persisted runs |
 | `GET /api/runs/summary` | Aggregate history metrics and fast-interpretation indicator |
 | `GET /api/runs/{id}` | Retrieve results, transcripts, scores, and failures |

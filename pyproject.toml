@@ -1,9 +1,24 @@
 [project]
-name = "swiss-german-test-bench"
+name = "swiss-german-transcription-test-bench"
 version = "0.1.0"
 description = "A Microsoft Foundry benchmark workbench for Swiss German audio comprehension."
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = [
+	"swiss-german",
+	"speech-to-text",
+	"automatic-speech-recognition",
+	"transcription",
+	"benchmarking",
+	"swissdial",
+	"azure-openai",
+	"microsoft-foundry",
+	"fastapi",
+	"dialects",
+]
+
+[project.urls]
+Repository = "https://github.com/flo7up/Swiss-german-transcription-test-bench"
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]

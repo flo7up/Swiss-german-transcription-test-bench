@@ -9,7 +9,7 @@ import io
 import json
 import mimetypes
 import os
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +29,7 @@ class StartRunPayload(BaseModel):
     item_ids: list[str] = Field(min_length=1)
     parameter_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     prompt: str = DEFAULT_TRANSCRIPTION_PROMPT
+    reference_mode: Literal["dialect", "standard-german"] = "dialect"
 
 
 class InstructionPresetPayload(BaseModel):
@@ -199,6 +200,7 @@ def create_app(
                 "result_status",
                 "error",
                 "prompt",
+                "reference_mode",
                 "parameters",
             ],
         )
@@ -223,6 +225,7 @@ def create_app(
                     "result_status": result["status"],
                     "error": result["error"],
                     "prompt": run["prompt"],
+                    "reference_mode": run["reference_mode"],
                     "parameters": json.dumps(run["parameters"], ensure_ascii=False),
                 }
             )
@@ -241,6 +244,7 @@ def create_app(
                     item_ids=payload.item_ids,
                     parameter_overrides=payload.parameter_overrides,
                     prompt=payload.prompt,
+                    reference_mode=payload.reference_mode,
                 )
             )
         except ValueError as error:

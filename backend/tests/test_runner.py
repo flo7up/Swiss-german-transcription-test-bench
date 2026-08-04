@@ -27,6 +27,15 @@ class CapturingTranscriber(FakeTranscriber):
         return await super().transcribe(model, item, parameters, prompt)
 
 
+class HighGermanTranscriber(CapturingTranscriber):
+    async def transcribe(self, model, item, parameters, prompt):
+        self.prompts.append(prompt)
+        return TranscriptionResponse(
+            transcript="guten tag miteinander",
+            conversation=[{"role": "assistant", "contents": ["guten tag miteinander"]}],
+        )
+
+
 class GatedTranscriber:
     def __init__(self) -> None:
         self.first_call_started = asyncio.Event()
@@ -42,6 +51,59 @@ class GatedTranscriber:
 
 
 class BenchmarkRunnerTests(unittest.TestCase):
+    def test_scores_against_selected_high_german_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            (root / "clip.wav").write_bytes(b"audio")
+            (root / "models.json").write_text(
+                '[{"id":"model-a","label":"Model A","deployment":"a","description":"a"}]',
+                encoding="utf-8",
+            )
+            (root / "manifest.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "be-0000",
+                        "audio_path": "clip.wav",
+                        "reference_transcript": "grüessech mitenand",
+                        "standard_german_transcript": "guten tag miteinander",
+                        "source": "ETH SwissDial 1.1",
+                        "dialect": "BE",
+                        "dialect_name": "Bernese German",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            settings = BenchmarkSettings(
+                model_registry_path=root / "models.json",
+                voice_options_path=root / "voice-options.json",
+                manifest_path=root / "manifest.jsonl",
+                database_path=root / "benchmark.sqlite3",
+                foundry_project_endpoint=None,
+                trace_enabled=False,
+                trace_sensitive_data=False,
+                trace_port=4317,
+            )
+            transcriber = HighGermanTranscriber()
+            repository = RunRepository(settings.database_path)
+            runner = BenchmarkRunner(settings, repository, transcriber)
+            run_id = runner.create_run(
+                BenchmarkRequest(
+                    model_ids=["model-a"],
+                    item_ids=["be-0000"],
+                    prompt="Transcribe exactly.",
+                    reference_mode="standard-german",
+                )
+            )
+
+            asyncio.run(runner.execute_run(run_id))
+            completed_run = repository.get_run(run_id)
+
+        self.assertEqual(completed_run["reference_mode"], "standard-german")
+        self.assertEqual(completed_run["results"][0]["reference_transcript"], "guten tag miteinander")
+        self.assertEqual(completed_run["results"][0]["word_error_rate"], 0)
+        self.assertIn("High German", transcriber.prompts[0])
+
     def test_adds_item_dialect_to_transcription_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_directory:
             root = Path(temp_directory)
