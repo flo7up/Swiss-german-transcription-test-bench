@@ -701,6 +701,48 @@ main {
   text-transform: capitalize;
 }
 
+.run-setup {
+  padding: 0 20px;
+  border-bottom: 1px solid var(--cp-border);
+  background: var(--cp-surface-soft);
+}
+
+.run-setup summary {
+  padding: 11px 0;
+  color: var(--cp-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.run-setup[open] {
+  padding-bottom: 14px;
+}
+
+.run-setup > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.run-setup span {
+  color: var(--cp-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.run-setup strong,
+.run-setup p {
+  margin: 0;
+  color: var(--cp-text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .status-value.completed {
   color: var(--cp-success);
 }

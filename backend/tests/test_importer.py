@@ -43,7 +43,7 @@ class SwissDialImporterTests(unittest.TestCase):
             count = IMPORTER.import_official_dataset(
                 dataset_dir,
                 output_dir,
-                sample_size=4,
+                catalog_size=4,
                 dialects=["ag", "be"],
                 seed=7,
             )

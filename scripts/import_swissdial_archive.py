@@ -13,7 +13,7 @@ import shutil
 import zipfile
 
 
-DEFAULT_SAMPLE_SIZE = 16
+DEFAULT_CATALOG_SIZE = 160
 DEFAULT_SAMPLE_SEED = 42
 DIALECT_NAMES = {
     "ag": "Aargau German",
@@ -39,10 +39,15 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--overwrite", action="store_true", help="Replace existing imported clip files")
     parser.add_argument(
+        "--catalog-size",
         "--sample-size",
+        dest="catalog_size",
         type=int,
-        default=DEFAULT_SAMPLE_SIZE,
-        help=f"Number of clips to import, balanced by dialect; 0 imports all (default: {DEFAULT_SAMPLE_SIZE})",
+        default=DEFAULT_CATALOG_SIZE,
+        help=(
+            "Number of clips made available to the app, balanced by dialect; "
+            f"0 imports all (default: {DEFAULT_CATALOG_SIZE})"
+        ),
     )
     parser.add_argument(
         "--dialects",
@@ -107,7 +112,7 @@ def import_official_dataset(
     dataset_dir: Path,
     output_dir: Path,
     overwrite: bool = False,
-    sample_size: int = DEFAULT_SAMPLE_SIZE,
+    catalog_size: int = DEFAULT_CATALOG_SIZE,
     dialects: list[str] | None = None,
     seed: int = DEFAULT_SAMPLE_SEED,
 ) -> int:
@@ -147,7 +152,7 @@ def import_official_dataset(
             candidates.append((audio_path, sentence))
         candidates_by_dialect[dialect] = candidates
 
-    selected = _balanced_sample(candidates_by_dialect, sample_size, seed)
+    selected = _balanced_sample(candidates_by_dialect, catalog_size, seed)
     if not selected:
         raise ValueError("No SwissDial audio files with matching Swiss German transcripts were found.")
 
@@ -243,7 +248,7 @@ def main() -> None:
             arguments.source,
             arguments.output_dir,
             arguments.overwrite,
-            arguments.sample_size,
+            arguments.catalog_size,
             arguments.dialects,
             arguments.seed,
         )

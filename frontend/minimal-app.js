@@ -164,6 +164,12 @@ function itemCanRun(item) {
   return Boolean(item?.audio_available && (state.referenceMode !== 'standard-german' || itemReference(item)))
 }
 
+function syncSampleSizeToSelection() {
+  if (state.selectedItemIds.length) {
+    state.sampleSize = state.selectedItemIds.length
+  }
+}
+
 function availableDialects() {
   const dialects = new Map()
   for (const item of state.items) {
@@ -180,7 +186,7 @@ function filteredItems() {
 }
 
 function sampleCapacity() {
-  return Math.min(20, filteredItems().filter(itemCanRun).length)
+  return filteredItems().filter(itemCanRun).length
 }
 
 function updateSampleSize(value) {
@@ -258,7 +264,7 @@ function dialectComparisonControl() {
   const disabled = models.length !== dialectComparisonModelIds.length || dialectCount < 2 || isRunInProgress() || state.starting
   return `<div class="dialect-compare-control">
     <button type="button" data-action="compare-dialects" ${disabled ? 'disabled' : ''}><strong>Compare all dialects</strong><span>${models.length} models / ${dialectCount} dialects / ${taskCount} tests</span></button>
-    <small>Uses up to two utterances per dialect and charts mean word match.</small>
+    <small>Uses up to two utterances per dialect, the selected reference, and the selected metrics.</small>
   </div>`
 }
 
@@ -277,8 +283,8 @@ function sampleControls() {
   return `<div class="sample-controls">
     <label><span>Audio dialect</span><select data-dialect-filter><option value="all" ${state.selectedDialect === 'all' ? 'selected' : ''}>All dialects</option>${dialectOptions}</select></label>
     <label><span>Evaluation reference</span><select data-reference-mode><option value="dialect" ${state.referenceMode === 'dialect' ? 'selected' : ''}>Matching Swiss German</option><option value="standard-german" ${state.referenceMode === 'standard-german' ? 'selected' : ''}>High German</option></select></label>
-    <label class="sample-size"><span>Sample</span><input data-sample-size type="number" min="1" max="${Math.max(1, capacity)}" step="1" value="${Math.min(state.sampleSize, Math.max(1, capacity))}" ${capacity ? '' : 'disabled'}></label>
-    <button type="button" class="secondary-button" data-action="resample-items">New sample</button>
+    <label class="sample-size"><span>Sample size</span><input data-sample-size type="number" min="1" max="${Math.max(1, capacity)}" step="1" value="${Math.min(state.sampleSize, Math.max(1, capacity))}" ${capacity ? '' : 'disabled'}></label>
+    <button type="button" class="secondary-button" data-action="resample-items">Resample</button>
   </div>`
 }
 
@@ -301,9 +307,9 @@ function utteranceRows() {
     return `<article class="utterance-row ${selected ? 'selected' : ''} ${selectable ? '' : 'unavailable'}">
       <label class="utterance-select">
         <input type="checkbox" data-item-id="${escapeHtml(item.id)}" ${selected ? 'checked' : ''} ${selectable ? '' : 'disabled'}>
-        <span class="utterance-copy"><strong>${escapeHtml(utterance)}</strong><small><span>${escapeHtml(itemDialectName(item))}</span><span>${escapeHtml(referenceModeLabel())} reference</span>${topic}</small></span>
+        <span class="utterance-copy"><strong>${escapeHtml(utterance)}</strong><small><span>${escapeHtml(itemDialectName(item))}</span>${topic}</small></span>
       </label>
-      ${item.audio_available ? `<audio controls preload="metadata" src="${escapeHtml(audioUrl)}">Audio playback is not supported by this browser.</audio>` : '<span class="missing-audio">Audio unavailable</span>'}
+      ${item.audio_available ? `<audio controls preload="none" src="${escapeHtml(audioUrl)}">Audio playback is not supported by this browser.</audio>` : '<span class="missing-audio">Audio unavailable</span>'}
     </article>`
   }).join('')
 
@@ -428,13 +434,18 @@ function dialectComparisonChart(run) {
     .filter(([dialect]) => dialect)
     .sort(([left], [right]) => left.localeCompare(right))
   const availableMetrics = selectedResultMetrics().filter((metric) => chartMetricDefinitions[metric])
-  if (models.length < 2 || dialects.length < 2 || !availableMetrics.length) return ''
+  if (!models.length || !dialects.length || !availableMetrics.length) return ''
 
   const metric = availableMetrics.includes(state.chartMetric) ? state.chartMetric : availableMetrics[0]
   const definition = chartMetricDefinitions[metric]
+  const referenceLabel = referenceModeLabel(run.reference_mode)
   const chartDescription = metric === 'match'
-    ? `Higher bars indicate closer transcription to the ${referenceModeLabel(run.reference_mode)} reference.`
-    : definition.description
+    ? `Higher bars indicate closer transcription to the ${referenceLabel} reference.`
+    : metric === 'wer'
+      ? `Lower bars indicate fewer word-level errors against the ${referenceLabel} reference.`
+      : metric === 'cer'
+        ? `Lower bars indicate fewer character-level errors against the ${referenceLabel} reference.`
+        : definition.description
   const series = dialects.map(([dialect, dialectName]) => ({
     dialect,
     dialectName,
@@ -466,20 +477,39 @@ function dialectComparisonChart(run) {
     const bars = modelSeries.map(({ model, values, average }, index) => {
       const height = average === null ? 0 : Math.max(0, Math.min(100, average / scaleMaximum * 100))
       const valueLabel = average === null ? (isRunInProgress(run) ? 'Pending' : 'No score') : chartValue(average, definition.kind)
-      const accessibleLabel = `${model.label}, ${dialectName}, ${metricDefinitions[metric].label}: ${valueLabel}${values.length ? ` across ${values.length} utterances` : ''}`
-      return `<span class="chart-bar series-${index % 2} ${average === null ? 'pending' : ''}" tabindex="0" role="img" aria-label="${escapeHtml(accessibleLabel)}"><i class="chart-bar-fill" style="--bar-height:${height}%"></i><span class="chart-tooltip">${escapeHtml(model.label)}<strong>${escapeHtml(valueLabel)}</strong><small>${values.length ? `${values.length} utterances` : 'Waiting for results'}</small></span></span>`
+      const utteranceCount = `${values.length} ${values.length === 1 ? 'utterance' : 'utterances'}`
+      const accessibleLabel = `${model.label}, ${dialectName}, ${metricDefinitions[metric].label}: ${valueLabel}${values.length ? ` across ${utteranceCount}` : ''}`
+      return `<span class="chart-bar series-${index % 2} ${average === null ? 'pending' : ''}" tabindex="0" role="img" aria-label="${escapeHtml(accessibleLabel)}"><i class="chart-bar-fill" style="--bar-height:${height}%"></i><span class="chart-tooltip">${escapeHtml(model.label)}<strong>${escapeHtml(valueLabel)}</strong><small>${values.length ? utteranceCount : 'Waiting for results'}</small></span></span>`
     }).join('')
     return `<div class="chart-group"><div class="chart-bars">${bars}</div><span title="${escapeHtml(dialectName)}">${escapeHtml(dialect)}</span></div>`
   }).join('')
 
   return `<section class="dialect-chart" aria-labelledby="dialect-chart-title">
-    <div class="dialect-chart-heading"><div><span>Dialect comparison</span><h3 id="dialect-chart-title">${escapeHtml(definition.title)}</h3><p>${escapeHtml(chartDescription)}</p></div><div class="chart-heading-actions">${metricControls}<div class="chart-legend">${legend}</div></div></div>
+    <div class="dialect-chart-heading"><div><span>${models.length > 1 ? 'Model comparison' : 'Model results'}</span><h3 id="dialect-chart-title">${escapeHtml(definition.title)}</h3><p>${escapeHtml(chartDescription)}</p></div><div class="chart-heading-actions">${metricControls}<div class="chart-legend">${legend}</div></div></div>
     <div class="chart-scroll"><div class="chart-canvas">
       <div class="chart-scale" aria-hidden="true">${scaleLabels}</div>
       <div class="chart-grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
       <div class="chart-groups" style="--dialect-count:${dialects.length}">${groups}</div>
     </div></div>
   </section>`
+}
+
+function runSetupDetails(run) {
+  const modelLabels = run.model_ids.map((modelId) => (
+    state.models.find((model) => model.id === modelId)?.label ?? modelId
+  ))
+  const parameterGroups = Object.entries(run.parameters ?? {}).flatMap(([modelId, parameters]) => {
+    const values = Object.entries(parameters ?? {})
+    if (!values.length) return []
+    const modelLabel = state.models.find((model) => model.id === modelId)?.label ?? modelId
+    return [`${modelLabel}: ${values.map(([name, value]) => `${name}=${value}`).join(', ')}`]
+  })
+  return `<details class="run-setup">
+    <summary>Run setup</summary>
+    <div><span>Models</span><strong>${escapeHtml(modelLabels.join(', '))}</strong></div>
+    <div><span>Prompt</span><p>${escapeHtml(run.prompt)}</p></div>
+    ${parameterGroups.length ? `<div><span>Parameters</span><p>${escapeHtml(parameterGroups.join(' / '))}</p></div>` : ''}
+  </details>`
 }
 
 function activeRunPanel() {
@@ -492,6 +522,12 @@ function activeRunPanel() {
   const showValidation = state.selectedMetrics.includes('validation')
   const metricHeaders = metrics.map((metric) => `<th>${metricHeader(metric)}</th>`).join('')
   const validationHeader = showValidation ? '<th>Model transcript</th>' : ''
+  const runReferenceMode = run.reference_mode ?? 'dialect'
+  const referenceHeader = `${referenceModeLabel(runReferenceMode)} reference`
+  const runDialects = [...new Set(run.item_ids.map((itemId) => itemDialect(itemById(itemId))).filter(Boolean))].sort()
+  const dialectSummary = runDialects.length === 1
+    ? itemDialectName(run.item_ids.map((itemId) => itemById(itemId)).find((item) => itemDialect(item) === runDialects[0]))
+    : `${runDialects.length} dialects (${runDialects.join(', ')})`
   const controlsDisabled = Boolean(state.runControlAction)
   const controls = run.status === 'paused'
     ? `<button type="button" class="secondary-button" data-action="resume-run" ${controlsDisabled ? 'disabled' : ''}>Resume</button><button type="button" class="danger-button" data-action="stop-run" ${controlsDisabled ? 'disabled' : ''}>Stop</button>`
@@ -511,15 +547,16 @@ function activeRunPanel() {
     ? `<div class="result-actions"><button type="button" class="secondary-button" data-action="reuse-run">Use this setup</button><a class="secondary-button" href="${apiBase}/api/runs/${encodeURIComponent(run.id)}/export.csv" download>Download CSV</a></div>`
     : ''
   const comparisonChart = dialectComparisonChart(run)
-    const runReferenceMode = run.reference_mode ?? 'dialect'
+  const setupDetails = runSetupDetails(run)
   return `<div class="result-summary">
       <div><span>Status</span><strong class="status-value ${escapeHtml(run.status)}">${escapeHtml(run.status)}</strong></div>
       <div><span>Completed</span><strong>${progress.completed} / ${progress.total}</strong></div>
+      <div><span>Audio</span><strong>${escapeHtml(dialectSummary || 'Unknown dialect')}</strong></div>
       <div><span>Reference</span><strong>${escapeHtml(referenceModeLabel(runReferenceMode))}</strong></div>
       ${metricSummary}
     </div>
-    ${progressPanel}${comparisonChart}${resultActions}
-    <div class="table-wrap"><table><thead><tr><th>Utterance</th><th>Model</th>${validationHeader}${metricHeaders}</tr></thead><tbody>${resultRows()}</tbody></table></div>`
+    ${setupDetails}${progressPanel}${comparisonChart}${resultActions}
+    <div class="table-wrap"><table><thead><tr><th>${escapeHtml(referenceHeader)}</th><th>Model</th>${validationHeader}${metricHeaders}</tr></thead><tbody>${resultRows()}</tbody></table></div>`
 }
 
 function historyRows() {
@@ -538,7 +575,7 @@ function historyRows() {
           ? rate(run.average_word_match_rate)
           : 'Open run'
     return `<button class="history-row" type="button" data-run-id="${escapeHtml(run.id)}">
-      <span class="history-primary"><strong>${run.model_ids.length} ${run.model_ids.length === 1 ? 'model' : 'models'} / ${run.item_ids.length} utterances</strong><small>${new Date(run.started_at).toLocaleString()}</small></span>
+      <span class="history-primary"><strong>${run.model_ids.length} ${run.model_ids.length === 1 ? 'model' : 'models'} / ${run.item_ids.length} utterances</strong><small>${new Date(run.started_at).toLocaleString()} / ${escapeHtml(referenceModeLabel(run.reference_mode))}</small></span>
       <span class="history-status ${escapeHtml(indicator.tone)}">${escapeHtml(indicator.label)}</span>
       <span class="history-metric"><small>${escapeHtml(metricDefinitions[preferredMetric]?.label ?? 'Result')}</small><strong>${value}</strong></span>
       <span class="history-count">${run.result_count ?? 0} / ${total}</span>
@@ -693,7 +730,13 @@ async function startDialectComparison() {
   state.selectedItemIds = items.map((item) => item.id)
   state.selectedDialect = 'all'
   state.sampleSize = items.length
-  if (!state.selectedMetrics.includes('match')) state.selectedMetrics = [...state.selectedMetrics, 'match']
+  const chartMetrics = selectedResultMetrics().filter((metric) => chartMetricDefinitions[metric])
+  if (!chartMetrics.length) {
+    state.selectedMetrics = [...state.selectedMetrics, 'match']
+    state.chartMetric = 'match'
+  } else if (!chartMetrics.includes(state.chartMetric)) {
+    state.chartMetric = chartMetrics[0]
+  }
   state.message = `Preparing ${models.length * items.length} dialect comparison tests`
   render()
   await startRun()
@@ -747,10 +790,13 @@ async function saveInstructionPreset() {
 function reuseActiveRun() {
   if (!state.activeRun) return
   const availableModelIds = new Set(state.models.map((model) => model.id))
-  const availableItemIds = new Set(state.items.filter((item) => item.audio_available).map((item) => item.id))
   state.selectedModelIds = state.activeRun.model_ids.filter((modelId) => availableModelIds.has(modelId))
   state.referenceMode = state.activeRun.reference_mode ?? 'dialect'
+  const availableItemIds = new Set(state.items.filter(itemCanRun).map((item) => item.id))
   state.selectedItemIds = state.activeRun.item_ids.filter((itemId) => availableItemIds.has(itemId))
+  const selectedDialects = [...new Set(state.selectedItemIds.map((itemId) => itemDialect(itemById(itemId))).filter(Boolean))]
+  state.selectedDialect = selectedDialects.length === 1 ? selectedDialects[0] : 'all'
+  syncSampleSizeToSelection()
   state.parameterOverrides = { ...state.parameterOverrides, ...state.activeRun.parameters }
   state.prompt = state.activeRun.prompt
   state.message = `Restored ${state.selectedItemIds.length} utterances and ${state.selectedModelIds.length} models`
@@ -826,6 +872,7 @@ app.addEventListener('change', (event) => {
     state.selectedItemIds = target.checked
       ? [...state.selectedItemIds, target.dataset.itemId]
       : state.selectedItemIds.filter((id) => id !== target.dataset.itemId)
+    syncSampleSizeToSelection()
     render()
   }
   if (target.matches('[data-metric-id]')) {
@@ -845,14 +892,21 @@ app.addEventListener('change', (event) => {
   }
   if (target.matches('[data-reference-mode]')) {
     const previousMode = state.referenceMode
+    const previousSelectionCount = state.selectedItemIds.length
     state.referenceMode = target.value
     if (state.prompt === defaultPrompt || state.prompt === highGermanPrompt) {
       state.prompt = state.referenceMode === 'standard-german' ? highGermanPrompt : defaultPrompt
     }
     state.sampleRound = 0
-    selectSample()
-    state.message = `${referenceModeLabel()} selected for display and scoring`
-    if (previousMode !== state.referenceMode) state.itemLimit = 5
+    const eligibleItemIds = new Set(filteredItems().filter(itemCanRun).map((item) => item.id))
+    state.selectedItemIds = state.selectedItemIds.filter((itemId) => eligibleItemIds.has(itemId))
+    if (previousSelectionCount && !state.selectedItemIds.length) selectSample()
+    syncSampleSizeToSelection()
+    const removedCount = previousSelectionCount - state.selectedItemIds.length
+    state.message = removedCount > 0
+      ? `${referenceModeLabel()} selected; ${removedCount} utterance${removedCount === 1 ? '' : 's'} lacked this reference`
+      : `${referenceModeLabel()} selected for display and scoring`
+    if (previousMode !== state.referenceMode && removedCount > 0) state.itemLimit = 5
     render()
   }
   if (target.matches('[data-sample-size]')) {

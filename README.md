@@ -15,7 +15,7 @@ The backend uses the Python [Microsoft Agent Framework](https://learn.microsoft.
 ## What It Does
 
 - Reads editable Microsoft Foundry deployment definitions from `config/models.json`.
-- Imports a balanced sample from the official extracted ETH SwissDial 1.1 dataset into an ignored `data/swissdial` runtime directory. Legacy TSV ZIP exports remain supported.
+- Imports a balanced 160-clip catalog from the official extracted ETH SwissDial 1.1 dataset into an ignored `data/swissdial` runtime directory. Legacy TSV ZIP exports remain supported.
 - Streams each imported test clip locally in the browser beside its reference utterance.
 - Separates the recording dialect filter from the evaluation reference, allowing scoring against the matching Swiss German transcript or its High German parallel text.
 - Lets evaluators choose any model-by-clip matrix and deployment-specific parameters.
@@ -76,13 +76,13 @@ The repository does not include ETH SwissDial media. Download [SwissDial 1.1 fro
 
   Edit each `deployment` value in `config/models.json` so it exactly matches a deployment in your Azure resource. The checked-in registry contains Realtime 2 and Realtime 2.1 entries as configuration examples; it does not provision those deployments.
 
-3. Download and extract [SwissDial 1.1](https://mtc.ethz.ch/publications/open-source/swiss-dial.html), then import its directory. The default is a deterministic 16-clip sample balanced across all eight dialects.
+3. Download and extract [SwissDial 1.1](https://mtc.ethz.ch/publications/open-source/swiss-dial.html), then import its directory. The default is a deterministic 160-clip catalog balanced across all eight dialects; the UI initially selects a 16-clip working sample from that catalog.
 
    ```powershell
   ./.venv/Scripts/python.exe scripts/import_swissdial_archive.py "C:\path\to\data1.1"
    ```
 
-  Use `--sample-size 20`, `--dialects be zh`, or `--seed 7` to change the bounded sample. A sample size of `0` imports every matching clip. The importer writes only the selected audio and `data/swissdial/manifest.jsonl`; both are ignored by Git. In the UI, choose all dialects or one dialect and select or resample 1-20 imported clips.
+  Use `--catalog-size 320`, `--dialects be zh`, or `--seed 7` to change the local catalog. A catalog size of `0` imports every matching clip, which requires roughly 9.5 GB for SwissDial 1.1. The legacy `--sample-size` spelling remains an alias for `--catalog-size`. The importer writes only cataloged audio and `data/swissdial/manifest.jsonl`; both are ignored by Git. In the UI, choose all dialects or one dialect and select or resample up to the full imported catalog.
 
 4. Start the API in one terminal.
 
@@ -148,6 +148,8 @@ Use **Audio dialect** to choose recordings from one canton or all available dial
 The UI also exposes **Word Match**, calculated as $\max(0, 1 - \text{WER})$. It gives a direct percentage where $100\%$ means the normalized word sequence exactly matched the reference. It is not a semantic similarity score: dialectal paraphrases or alternate spellings can still lower the value. Each row keeps the true reference utterance next to the actual model response so the score can be inspected in context.
 
 Use **Compare all dialects** in the model panel to select both Realtime deployments and queue a balanced 32-test run over the default 16-utterance corpus. While results arrive, the run view groups the active selected metric by dialect in a vertical bar chart. When several numeric result fields are selected, switch the chart among Match, WER, CER, and latency. Hover or focus a bar for the exact model, dialect, value, and scored utterance count.
+
+The same chart is shown for ordinary runs with a single selected model, including runs limited to one dialect.
 
 The run-history overview aggregates all persisted runs into total runs, successful results versus all results, mean Match, and mean latency. Each individual history row includes its task completion ratio, Match, WER, mean latency, and a status-quality indicator. Indicators prioritize active/stopped/error states, then classify completed scored runs as **Strong match** ($\geq 85\%$), **Review** ($60\%-85\%$), or **Low match** ($< 60\%$).
 
