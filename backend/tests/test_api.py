@@ -92,9 +92,32 @@ class ApiTests(unittest.TestCase):
                 )
                 self.assertEqual(high_german_response.status_code, 202)
                 high_german_run = client.get(f"/api/runs/{high_german_response.json()['id']}").json()
+                guided_response = client.post(
+                    "/api/runs",
+                    json={
+                        "model_ids": ["model-a"],
+                        "item_ids": ["clip-a"],
+                        "reference_mode": "standard-german",
+                        "strategy": "guided",
+                    },
+                )
+                self.assertEqual(guided_response.status_code, 202)
+                guided_run = client.get(f"/api/runs/{guided_response.json()['id']}").json()
+                guided_export = client.get(f"/api/runs/{guided_response.json()['id']}/export.csv")
+                invalid_strategy = client.post(
+                    "/api/runs", json={"model_ids": ["model-a"], "item_ids": ["clip-a"], "strategy": "two-pass"}
+                )
+                dialect_atlas = client.get("/api/dialects").json()
 
+        self.assertEqual(guided_run["strategy"], "guided")
+        self.assertIn("strategy", guided_export.text.splitlines()[0])
+        self.assertIn("chrf", guided_export.text.splitlines()[0])
+        self.assertEqual(invalid_strategy.status_code, 422)
+        self.assertEqual(len(dialect_atlas["dialects"]), 8)
+        self.assertIn("share_of_german_speakers", dialect_atlas["dialects"][0])
         self.assertEqual(run["status"], "completed")
         self.assertEqual(run["reference_mode"], "dialect")
+        self.assertEqual(run["strategy"], "baseline")
         self.assertEqual(run["results"][0]["word_error_rate"], 0)
         self.assertEqual(run["results"][0]["word_match_rate"], 1)
         self.assertEqual(run["results"][0]["time_to_first_token_ms"], 125)

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.app.catalog import load_dataset_items, load_models
+from backend.app.catalog import load_dataset_items, load_dialect_atlas, load_models
 
 
 class CatalogTests(unittest.TestCase):
@@ -61,6 +61,52 @@ class CatalogTests(unittest.TestCase):
 
     def test_missing_manifest_returns_empty_dataset(self) -> None:
         self.assertEqual(load_dataset_items(Path("does-not-exist.jsonl")), [])
+
+    def test_dialect_atlas_derives_speaker_shares_from_canton_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            path = Path(temp_directory) / "dialects.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "cantons": {
+                            "ZH": {"name": "Zurich", "population": 1000, "german_share": 0.8},
+                            "SZ": {"name": "Schwyz", "population": 500, "german_share": 1.0},
+                            "LU": {"name": "Lucerne", "population": 500, "german_share": 0.6},
+                            "GE": {"name": "Geneva", "population": 1000, "german_share": 0.0},
+                        },
+                        "dialects": [
+                            {"code": "ZH", "name": "Zurich German", "region_cantons": ["ZH"]},
+                            {"code": "LU", "name": "Lucerne German", "region_cantons": ["LU", "SZ"]},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            atlas = load_dialect_atlas(path)
+
+        self.assertEqual(atlas["total_population"], 3000)
+        self.assertEqual(atlas["total_german_speakers"], 1600)
+        self.assertEqual([dialect["code"] for dialect in atlas["dialects"]], ["ZH", "LU"])
+        lucerne = atlas["dialects"][1]
+        self.assertEqual(lucerne["core_speakers"], 300)
+        self.assertEqual(lucerne["region_speakers"], 800)
+        self.assertAlmostEqual(lucerne["share_of_german_speakers"], 0.5)
+        self.assertAlmostEqual(atlas["coverage_share"], 1.0)
+
+    def test_repository_dialect_atlas_is_consistent(self) -> None:
+        atlas = load_dialect_atlas(Path(__file__).resolve().parents[2] / "config" / "dialects.json")
+        codes = {dialect["code"] for dialect in atlas["dialects"]}
+
+        self.assertEqual(codes, {"AG", "BE", "BS", "GR", "LU", "SG", "VS", "ZH"})
+        self.assertEqual(len(atlas["cantons"]), 26)
+        for dialect in atlas["dialects"]:
+            self.assertTrue(set(dialect["region_cantons"]) <= set(atlas["cantons"]))
+            self.assertTrue(dialect["features"])
+        self.assertGreater(atlas["coverage_share"], 0.8)
+        self.assertLess(atlas["coverage_share"], 1)
+
+    def test_missing_dialect_atlas_returns_empty_payload(self) -> None:
+        self.assertEqual(load_dialect_atlas(Path("does-not-exist.json"))["dialects"], [])
 
 
 if __name__ == "__main__":

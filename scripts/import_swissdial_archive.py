@@ -62,6 +62,14 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_SAMPLE_SEED,
         help=f"Deterministic sampling seed (default: {DEFAULT_SAMPLE_SEED})",
     )
+    parser.add_argument(
+        "--examples-only",
+        action="store_true",
+        help=(
+            "Only (re)build examples.jsonl from the source directory's sentences_ch_de_numerics.json "
+            "for the existing manifest; no audio is required"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -71,6 +79,57 @@ def _write_manifest(output_dir: Path, records: list[dict[str, object]]) -> None:
         "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
         encoding="utf-8",
     )
+
+
+def _content_words(text: str) -> set[str]:
+    return {word for word in re.findall(r"\w+", text.casefold()) if len(word) > 2}
+
+
+def build_example_pool(dataset_dir: Path, output_dir: Path, max_overlap: float = 0.5) -> int:
+    """Write text-only dialect/High German pairs that cannot leak evaluated sentences.
+
+    Excludes every sentence ID in the manifest (sentences are parallel across dialects) and any
+    sentence whose High German text overlaps an evaluated sentence by more than ``max_overlap``
+    (Jaccard over content words), which removes templated near-duplicates.
+    """
+    transcript_path = dataset_dir / "sentences_ch_de_numerics.json"
+    if not transcript_path.is_file():
+        raise ValueError(f"Official SwissDial transcript file not found: {transcript_path}")
+    manifest_path = output_dir / "manifest.jsonl"
+    if not manifest_path.is_file():
+        raise ValueError(f"Import the catalog before building examples: {manifest_path} is missing")
+
+    evaluated = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    evaluated_ids = {int(record["sentence_id"]) for record in evaluated if record.get("sentence_id") is not None}
+    evaluated_words = [
+        _content_words(str(record.get("standard_german_transcript", "")))
+        for record in evaluated
+        if record.get("standard_german_transcript")
+    ]
+
+    records: list[dict[str, object]] = []
+    for sentence in json.loads(transcript_path.read_text(encoding="utf-8")):
+        if not isinstance(sentence, dict) or "id" not in sentence or int(sentence["id"]) in evaluated_ids:
+            continue
+        standard = str(sentence.get("de", "")).strip()
+        words = _content_words(standard)
+        if not standard or not words:
+            continue
+        if any(len(words & other) / len(words | other) > max_overlap for other in evaluated_words if other):
+            continue
+        dialects = {
+            dialect: str(sentence.get(f"ch_{dialect}", "")).strip()
+            for dialect in DIALECT_NAMES
+            if str(sentence.get(f"ch_{dialect}", "")).strip()
+        }
+        if dialects:
+            records.append({"sentence_id": int(sentence["id"]), "de": standard, "dialects": dialects})
+
+    (output_dir / "examples.jsonl").write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    return len(records)
 
 
 def _balanced_sample(
@@ -243,6 +302,10 @@ def import_archive(archive_path: Path, output_dir: Path, overwrite: bool = False
 
 def main() -> None:
     arguments = parse_arguments()
+    if arguments.examples_only:
+        example_count = build_example_pool(arguments.source, arguments.output_dir)
+        print(f"Wrote {example_count} leakage-filtered example sentences to {arguments.output_dir / 'examples.jsonl'}.")
+        return
     if arguments.source.is_dir():
         count = import_official_dataset(
             arguments.source,
@@ -252,6 +315,8 @@ def main() -> None:
             arguments.dialects,
             arguments.seed,
         )
+        example_count = build_example_pool(arguments.source, arguments.output_dir)
+        print(f"Wrote {example_count} leakage-filtered example sentences for prompting.")
     else:
         count = import_archive(arguments.source, arguments.output_dir, arguments.overwrite)
     print(f"Imported {count} SwissDial clips into {arguments.output_dir}.")

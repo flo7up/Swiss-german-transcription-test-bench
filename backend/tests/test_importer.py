@@ -78,6 +78,38 @@ class SwissDialImporterTests(unittest.TestCase):
         self.assertEqual(record["reference_transcript"], "grüezi mitenand")
         self.assertEqual(record["canton"], "ZH")
 
+    def test_example_pool_excludes_evaluated_sentences_and_near_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            dataset_dir = root / "data1.1"
+            dataset_dir.mkdir()
+            sentences = [
+                {"id": 1, "de": "Der Hund bellt laut im Garten.", "ch_be": "Dr Hund bället lut im Garte."},
+                {"id": 2, "de": "Der Hund bellt laut im Hof.", "ch_be": "Dr Hund bället lut im Hof."},
+                {"id": 3, "de": "Morgen scheint die Sonne.", "ch_be": "Morn schiint d Sunne.", "ch_zh": "Morn schiint d Sunne."},
+                {"id": 4, "de": "", "ch_be": "Leer."},
+            ]
+            (dataset_dir / "sentences_ch_de_numerics.json").write_text(json.dumps(sentences), encoding="utf-8")
+            output_dir = root / "dataset"
+            output_dir.mkdir()
+            (output_dir / "manifest.jsonl").write_text(
+                json.dumps(
+                    {"id": "be-0001", "sentence_id": 1, "standard_german_transcript": "Der Hund bellt laut im Garten."}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            count = IMPORTER.build_example_pool(dataset_dir, output_dir)
+            records = [
+                json.loads(line)
+                for line in (output_dir / "examples.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(count, 1)
+        self.assertEqual(records[0]["sentence_id"], 3)
+        self.assertEqual(records[0]["dialects"], {"be": "Morn schiint d Sunne.", "zh": "Morn schiint d Sunne."})
+
 
 if __name__ == "__main__":
     unittest.main()

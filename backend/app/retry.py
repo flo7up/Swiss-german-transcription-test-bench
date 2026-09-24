@@ -16,9 +16,9 @@ ResultT = TypeVar("ResultT")
 
 @dataclass(frozen=True)
 class RetryPolicy:
-    max_attempts: int = 4
+    max_attempts: int = 6
     base_delay_seconds: float = 0.75
-    max_delay_seconds: float = 8.0
+    max_delay_seconds: float = 16.0
     jitter_ratio: float = 0.2
 
 

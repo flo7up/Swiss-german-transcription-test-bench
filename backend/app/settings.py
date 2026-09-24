@@ -22,7 +22,10 @@ class BenchmarkSettings:
     trace_enabled: bool
     trace_sensitive_data: bool
     trace_port: int
-
+    dialects_path: Path = PROJECT_ROOT / "config" / "dialects.json"
+    examples_path: Path | None = None
+    refiner_deployment: str | None = None
+    refiner_reasoning_effort: str | None = "low"
 
 def load_settings() -> BenchmarkSettings:
     """Read non-secret configuration. Credentials remain with Azure identity providers."""
@@ -38,4 +41,8 @@ def load_settings() -> BenchmarkSettings:
         trace_enabled=os.getenv("BENCHMARK_TRACE_ENABLED", "false").lower() == "true",
         trace_sensitive_data=os.getenv("BENCHMARK_TRACE_SENSITIVE_DATA", "false").lower() == "true",
         trace_port=int(os.getenv("BENCHMARK_TRACE_PORT", "4317")),
+        dialects_path=Path(os.getenv("BENCHMARK_DIALECTS_PATH", PROJECT_ROOT / "config" / "dialects.json")),
+        examples_path=Path(os.getenv("BENCHMARK_EXAMPLES_PATH", data_dir / "examples.jsonl")),
+        refiner_deployment=os.getenv("BENCHMARK_REFINER_DEPLOYMENT") or None,
+        refiner_reasoning_effort=os.getenv("BENCHMARK_REFINER_REASONING_EFFORT", "low") or None,
     )

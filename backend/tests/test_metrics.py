@@ -1,6 +1,6 @@
 import unittest
 
-from backend.app.metrics import normalize_transcript, score_transcript, word_match_rate
+from backend.app.metrics import chrf_score, normalize_transcript, score_transcript, word_match_rate
 
 
 class TranscriptMetricTests(unittest.TestCase):
@@ -27,6 +27,16 @@ class TranscriptMetricTests(unittest.TestCase):
         self.assertEqual(word_match_rate(0.25), 0.75)
         self.assertEqual(word_match_rate(1.5), 0)
         self.assertIsNone(word_match_rate(None))
+
+    def test_chrf_rewards_partial_character_overlap(self) -> None:
+        self.assertEqual(chrf_score("Guten Tag miteinander", "guten tag, miteinander!"), 1)
+        self.assertEqual(chrf_score("Weisse Blutkörperchen", "Weiße Blutkörperchen"), 1)
+        self.assertEqual(chrf_score("guten tag", ""), 0)
+        self.assertIsNone(chrf_score(None, "guten tag"))
+        self.assertIsNone(chrf_score("guten tag", None))
+        partial = chrf_score("eine spezielle Herausforderung", "eine besondere Herausforderung")
+        self.assertGreater(partial, 0.5)
+        self.assertLess(partial, 1)
 
 
 if __name__ == "__main__":

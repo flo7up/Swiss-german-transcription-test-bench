@@ -10,7 +10,7 @@ import sqlite3
 from typing import Any
 import uuid
 
-from .metrics import word_match_rate
+from .metrics import chrf_score, word_match_rate
 
 
 def _timestamp() -> str:
@@ -44,6 +44,7 @@ class RunRepository:
                     parameters_json TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     reference_mode TEXT NOT NULL DEFAULT 'dialect',
+                    strategy TEXT NOT NULL DEFAULT 'baseline',
                     error TEXT
                 );
                 CREATE TABLE IF NOT EXISTS results (
@@ -78,6 +79,8 @@ class RunRepository:
                 connection.execute(
                     "ALTER TABLE runs ADD COLUMN reference_mode TEXT NOT NULL DEFAULT 'dialect'"
                 )
+            if "strategy" not in run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN strategy TEXT NOT NULL DEFAULT 'baseline'")
             result_columns = {row["name"] for row in connection.execute("PRAGMA table_info(results)")}
             if "time_to_first_token_ms" not in result_columns:
                 connection.execute("ALTER TABLE results ADD COLUMN time_to_first_token_ms REAL")
@@ -121,14 +124,16 @@ class RunRepository:
         parameters: dict[str, dict[str, Any]],
         prompt: str,
         reference_mode: str,
+        strategy: str = "baseline",
     ) -> str:
         run_id = str(uuid.uuid4())
         with closing(self._connection()) as connection:
             connection.execute(
                 """
                 INSERT INTO runs (
-                    id, status, started_at, model_ids_json, item_ids_json, parameters_json, prompt, reference_mode
-                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)
+                    id, status, started_at, model_ids_json, item_ids_json, parameters_json, prompt, reference_mode,
+                    strategy
+                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -138,6 +143,7 @@ class RunRepository:
                     json.dumps(parameters),
                     prompt,
                     reference_mode,
+                    strategy,
                 ),
             )
             connection.commit()
@@ -311,6 +317,8 @@ class RunRepository:
             if scored_results
             else None
         )
+        chrf_results = [result["chrf"] for result in result_payloads if result["chrf"] is not None]
+        payload["average_chrf"] = sum(chrf_results) / len(chrf_results) if chrf_results else None
         payload["average_latency_ms"] = (
             sum(result["latency_ms"] for result in timed_results) / len(timed_results)
             if timed_results
@@ -350,6 +358,7 @@ class RunRepository:
             "parameters": json.loads(row["parameters_json"]),
             "prompt": row["prompt"],
             "reference_mode": row["reference_mode"],
+            "strategy": row["strategy"] if "strategy" in row.keys() else "baseline",
             "error": row["error"],
             "result_count": result_count,
             "total_task_count": total_task_count,
@@ -441,6 +450,7 @@ class RunRepository:
                 word_match_rate(row["word_error_rate"])
             ),
             "character_error_rate": row["character_error_rate"],
+            "chrf": chrf_score(row["reference_transcript"], row["transcript"]),
             "latency_ms": row["latency_ms"],
             "time_to_first_token_ms": row["time_to_first_token_ms"],
             "conversation": json.loads(row["conversation_json"]) if row["conversation_json"] else None,

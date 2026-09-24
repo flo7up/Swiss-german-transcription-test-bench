@@ -34,7 +34,34 @@ class AudioTranscriber(Protocol):
         item: DatasetItem,
         parameters: dict[str, Any],
         prompt: str,
+        follow_up_prompt: str | None = None,
     ) -> TranscriptionResponse: ...
+
+
+class TokenCache:
+    """Reuse one Entra token until shortly before expiry instead of invoking the credential chain per clip."""
+
+    _REFRESH_MARGIN_SECONDS = 300
+
+    def __init__(self) -> None:
+        self._credential: Any = None
+        self._tokens: dict[str, Any] = {}
+        self._lock: asyncio.Lock | None = None
+
+    async def get(self, scope: str) -> str:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            cached = self._tokens.get(scope)
+            if cached is not None and cached.expires_on - time.time() > self._REFRESH_MARGIN_SECONDS:
+                return cached.token
+            if self._credential is None:
+                from azure.identity.aio import DefaultAzureCredential
+
+                self._credential = DefaultAzureCredential()
+            token = await self._credential.get_token(scope)
+            self._tokens[scope] = token
+            return token.token
 
 
 class FoundryAudioTranscriber:
@@ -49,6 +76,7 @@ class FoundryAudioTranscriber:
         item: DatasetItem,
         parameters: dict[str, Any],
         prompt: str,
+        follow_up_prompt: str | None = None,
     ) -> TranscriptionResponse:
         if not self.settings.foundry_project_endpoint:
             raise RuntimeError("FOUNDRY_PROJECT_ENDPOINT is required before a model run can start.")
@@ -71,8 +99,8 @@ class FoundryAudioTranscriber:
                 client=client,
                 name="swiss-german-transcriber",
                 instructions=(
-                    "You transcribe Swiss German audio faithfully. Return only the transcript, with no heading, "
-                    "translation, explanation, or confidence statement. Preserve dialectal spellings when audible."
+                    "You process Swiss German audio. Follow the user's instructions exactly and return only the "
+                    "requested text, with no heading, explanation, or confidence statement."
                 ),
                 default_options=parameters,
             )
@@ -88,10 +116,20 @@ class FoundryAudioTranscriber:
                 ],
             )
             response = await retry_rate_limited(lambda: agent.run(message))
+            conversation = [message.to_dict() for message in response.messages]
+            if follow_up_prompt is not None:
+                first_pass = response.text.strip()
+                follow_up = Message(role="user", contents=[Content.from_text(text=follow_up_prompt)])
+                history = [message, *response.messages, follow_up]
+                response = await retry_rate_limited(lambda: agent.run(history))
+                conversation = [
+                    {"role": "assistant", "pass": "dialect", "contents": [first_pass]},
+                    *[entry.to_dict() for entry in response.messages],
+                ]
 
         return TranscriptionResponse(
             transcript=response.text.strip(),
-            conversation=[message.to_dict() for message in response.messages],
+            conversation=conversation,
         )
 
 
@@ -101,8 +139,9 @@ class RealtimeAudioTranscriber:
     _TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
     _PCM_CHUNK_BYTES = 4_800  # 100 ms at 24 kHz, 16-bit mono.
 
-    def __init__(self, settings: BenchmarkSettings) -> None:
+    def __init__(self, settings: BenchmarkSettings, tokens: "TokenCache | None" = None) -> None:
         self.settings = settings
+        self._tokens = tokens or TokenCache()
 
     @staticmethod
     def _decode_pcm(audio_path: str) -> bytes:
@@ -125,6 +164,7 @@ class RealtimeAudioTranscriber:
         item: DatasetItem,
         parameters: dict[str, Any],
         prompt: str,
+        follow_up_prompt: str | None = None,
     ) -> TranscriptionResponse:
         endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         if not endpoint:
@@ -136,34 +176,41 @@ class RealtimeAudioTranscriber:
         realtime_endpoint = endpoint.replace("https://", "wss://", 1).rstrip("/")
         websocket_url = f"{realtime_endpoint}/realtime?model={quote(model.deployment, safe='')}"
 
-        from azure.identity.aio import DefaultAzureCredential
+        token = await self._tokens.get(self._TOKEN_SCOPE)
+        transcript, time_to_first_token_ms, first_pass = await retry_rate_limited(
+            lambda: self._run_session(websocket_url, token, pcm_audio, prompt, follow_up_prompt)
+        )
 
-        credential = DefaultAzureCredential()
-        try:
-            token = (await credential.get_token(self._TOKEN_SCOPE)).token
-            transcript, time_to_first_token_ms = await retry_rate_limited(
-                lambda: self._run_session(websocket_url, token, pcm_audio, prompt)
+        conversation: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "contents": [prompt],
+                "audio_file": item.audio_path.name,
+                "transport": "azure-openai-realtime",
+            }
+        ]
+        if first_pass is not None:
+            conversation.extend(
+                [
+                    {"role": "assistant", "pass": "dialect", "contents": [first_pass]},
+                    {"role": "user", "contents": [follow_up_prompt]},
+                ]
             )
-        finally:
-            await credential.close()
-
+        conversation.append({"role": "assistant", "contents": [transcript]})
         return TranscriptionResponse(
             transcript=transcript.strip(),
             time_to_first_token_ms=time_to_first_token_ms,
-            conversation=[
-                {
-                    "role": "user",
-                    "contents": [prompt],
-                    "audio_file": item.audio_path.name,
-                    "transport": "azure-openai-realtime",
-                },
-                {"role": "assistant", "contents": [transcript]},
-            ],
+            conversation=conversation,
         )
 
     async def _run_session(
-        self, websocket_url: str, token: str, pcm_audio: bytes, prompt: str
-    ) -> tuple[str, float]:
+        self,
+        websocket_url: str,
+        token: str,
+        pcm_audio: bytes,
+        prompt: str,
+        follow_up_prompt: str | None = None,
+    ) -> tuple[str, float, str | None]:
         async with websockets.connect(
             websocket_url,
             additional_headers={"Authorization": f"Bearer {token}"},
@@ -213,8 +260,33 @@ class RealtimeAudioTranscriber:
                     }
                 )
             )
-            return await self._collect_text_response(socket, response_started)
+            first_text, first_token_ms = await self._collect_text_response(socket, response_started)
+            if follow_up_prompt is None:
+                return first_text, first_token_ms, None
 
+            # The committed audio and first answer stay in the session, so the translation turn can reuse both.
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": follow_up_prompt}],
+                        },
+                    }
+                )
+            )
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "response": {"output_modalities": ["text"], "instructions": follow_up_prompt},
+                    }
+                )
+            )
+            final_text, final_token_ms = await self._collect_text_response(socket, response_started)
+            return final_text, final_token_ms, first_text.strip()
     @staticmethod
     async def _receive_event(socket: Any, expected_type: str) -> dict[str, Any]:
         event = json.loads(await asyncio.wait_for(socket.recv(), timeout=30))
@@ -228,7 +300,7 @@ class RealtimeAudioTranscriber:
     async def _collect_text_response(socket: Any, response_started: float) -> tuple[str, float]:
         transcript = ""
         time_to_first_token_ms = None
-        for _ in range(200):
+        for _ in range(600):
             event = json.loads(await asyncio.wait_for(socket.recv(), timeout=45))
             event_type = event.get("type")
             if event_type in {"response.output_text.delta", "response.text.delta"}:
@@ -266,7 +338,8 @@ class RoutedAudioTranscriber:
         item: DatasetItem,
         parameters: dict[str, Any],
         prompt: str,
+        follow_up_prompt: str | None = None,
     ) -> TranscriptionResponse:
         if model.transport == "azure-openai-realtime":
-            return await self.realtime.transcribe(model, item, parameters, prompt)
-        return await self.foundry.transcribe(model, item, parameters, prompt)
+            return await self.realtime.transcribe(model, item, parameters, prompt, follow_up_prompt)
+        return await self.foundry.transcribe(model, item, parameters, prompt, follow_up_prompt)

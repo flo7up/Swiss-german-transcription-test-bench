@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .catalog import load_dataset_items, load_models, load_voice_options
+from .catalog import load_dataset_items, load_dialect_atlas, load_models, load_voice_options
+from .refiner import AzureOpenAITextRefiner, TextRefiner
 from .repository import RunRepository
 from .runner import BenchmarkRequest, BenchmarkRunner, DEFAULT_TRANSCRIPTION_PROMPT
 from .settings import BenchmarkSettings, PROJECT_ROOT, load_settings
@@ -30,6 +31,7 @@ class StartRunPayload(BaseModel):
     parameter_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     prompt: str = DEFAULT_TRANSCRIPTION_PROMPT
     reference_mode: Literal["dialect", "standard-german"] = "dialect"
+    strategy: Literal["baseline", "guided", "two-pass", "ensemble"] = "baseline"
 
 
 class InstructionPresetPayload(BaseModel):
@@ -42,9 +44,13 @@ class SafeStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope: Any) -> Response:
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except OSError:
             return Response(status_code=status.HTTP_404_NOT_FOUND)
+        # Revalidate the HTML shell so versioned asset URLs take effect immediately after updates.
+        if response.media_type == "text/html":
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _configure_observability(settings: BenchmarkSettings) -> None:
@@ -78,11 +84,14 @@ def _item_payload(item: Any) -> dict[str, Any]:
 def create_app(
     settings: BenchmarkSettings | None = None,
     transcriber: AudioTranscriber | None = None,
+    refiner: TextRefiner | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     _configure_observability(settings)
     repository = RunRepository(settings.database_path)
-    runner = BenchmarkRunner(settings, repository, transcriber or RoutedAudioTranscriber(settings))
+    if refiner is None and settings.refiner_deployment:
+        refiner = AzureOpenAITextRefiner(settings.refiner_deployment, settings.refiner_reasoning_effort)
+    runner = BenchmarkRunner(settings, repository, transcriber or RoutedAudioTranscriber(settings), refiner)
 
     app = FastAPI(title="Swiss German Test Bench", version="0.1.0")
     origins = [origin.strip() for origin in os.getenv("BENCHMARK_CORS_ORIGINS", "http://localhost:5173").split(",")]
@@ -120,6 +129,7 @@ def create_app(
             "status": "ok",
             "authentication": "rbac-default-azure-credential",
             "foundry_configured": bool(settings.foundry_project_endpoint),
+            "refiner_deployment": refiner.deployment if refiner is not None else None,
             "model_count": len(load_models(settings.model_registry_path)),
             "voice_option_count": len(load_voice_options(settings.voice_options_path)),
             "dataset_item_count": len(load_dataset_items(settings.manifest_path)),
@@ -143,6 +153,10 @@ def create_app(
     @app.get("/api/voice-options")
     def voice_options() -> list[dict[str, Any]]:
         return load_voice_options(settings.voice_options_path)
+
+    @app.get("/api/dialects")
+    def dialects() -> dict[str, Any]:
+        return load_dialect_atlas(settings.dialects_path)
 
     @app.get("/api/dataset/items")
     def dataset_items() -> list[dict[str, Any]]:
@@ -196,12 +210,14 @@ def create_app(
                 "word_match_rate",
                 "word_error_rate",
                 "character_error_rate",
+                "chrf",
                 "latency_ms",
                 "time_to_first_token_ms",
                 "result_status",
                 "error",
                 "prompt",
                 "reference_mode",
+                "strategy",
                 "parameters",
             ],
         )
@@ -222,12 +238,14 @@ def create_app(
                     "word_match_rate": result["word_match_rate"],
                     "word_error_rate": result["word_error_rate"],
                     "character_error_rate": result["character_error_rate"],
+                    "chrf": result["chrf"],
                     "latency_ms": result["latency_ms"],
                     "time_to_first_token_ms": result["time_to_first_token_ms"],
                     "result_status": result["status"],
                     "error": result["error"],
                     "prompt": run["prompt"],
                     "reference_mode": run["reference_mode"],
+                    "strategy": run["strategy"],
                     "parameters": json.dumps(run["parameters"], ensure_ascii=False),
                 }
             )
@@ -247,6 +265,7 @@ def create_app(
                     parameter_overrides=payload.parameter_overrides,
                     prompt=payload.prompt,
                     reference_mode=payload.reference_mode,
+                    strategy=payload.strategy,
                 )
             )
         except ValueError as error:

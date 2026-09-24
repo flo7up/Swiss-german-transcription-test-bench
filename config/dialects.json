@@ -1,0 +1,297 @@
+{
+  "sources": [
+    {
+      "label": "BFS STATPOP: permanent resident population by canton, 31 December 2025",
+      "url": "https://www.pxweb.bfs.admin.ch/pxweb/en/px-x-0102010000_101/-/px-x-0102010000_101.px/"
+    },
+    {
+      "label": "BFS Structural Survey 2022, T 01.08.01.02: main languages by canton (residents aged 15+, multiple answers possible)",
+      "url": "https://www.bfs.admin.ch/asset/de/31085874"
+    }
+  ],
+  "methodology": "Estimated German-speaking residents = canton population (STATPOP 2025) x share of residents naming German or Swiss German as a main language (Structural Survey 2022). Dialect regions group cantons whose dialects are closest to the SwissDial recording; dialect borders do not follow canton borders, so region figures are approximations.",
+  "population_year": 2025,
+  "language_survey_year": 2022,
+  "cantons": {
+    "ZH": {
+      "name": "Zurich",
+      "population": 1632918,
+      "german_share": 0.794
+    },
+    "BE": {
+      "name": "Bern",
+      "population": 1076127,
+      "german_share": 0.826
+    },
+    "LU": {
+      "name": "Lucerne",
+      "population": 441500,
+      "german_share": 0.875
+    },
+    "UR": {
+      "name": "Uri",
+      "population": 38581,
+      "german_share": 0.908
+    },
+    "SZ": {
+      "name": "Schwyz",
+      "population": 170072,
+      "german_share": 0.866
+    },
+    "OW": {
+      "name": "Obwalden",
+      "population": 39879,
+      "german_share": 0.896
+    },
+    "NW": {
+      "name": "Nidwalden",
+      "population": 45664,
+      "german_share": 0.901
+    },
+    "GL": {
+      "name": "Glarus",
+      "population": 42451,
+      "german_share": 0.846
+    },
+    "ZG": {
+      "name": "Zug",
+      "population": 135018,
+      "german_share": 0.789
+    },
+    "FR": {
+      "name": "Fribourg",
+      "population": 350918,
+      "german_share": 0.252
+    },
+    "SO": {
+      "name": "Solothurn",
+      "population": 291583,
+      "german_share": 0.867
+    },
+    "BS": {
+      "name": "Basel-Stadt",
+      "population": 204157,
+      "german_share": 0.748
+    },
+    "BL": {
+      "name": "Basel-Landschaft",
+      "population": 303872,
+      "german_share": 0.861
+    },
+    "SH": {
+      "name": "Schaffhausen",
+      "population": 90087,
+      "german_share": 0.86
+    },
+    "AR": {
+      "name": "Appenzell Ausserrhoden",
+      "population": 57221,
+      "german_share": 0.915
+    },
+    "AI": {
+      "name": "Appenzell Innerrhoden",
+      "population": 16890,
+      "german_share": 0.926
+    },
+    "SG": {
+      "name": "St. Gallen",
+      "population": 544040,
+      "german_share": 0.87
+    },
+    "GR": {
+      "name": "Grisons",
+      "population": 207400,
+      "german_share": 0.732
+    },
+    "AG": {
+      "name": "Aargau",
+      "population": 743768,
+      "german_share": 0.85
+    },
+    "TG": {
+      "name": "Thurgau",
+      "population": 302806,
+      "german_share": 0.883
+    },
+    "TI": {
+      "name": "Ticino",
+      "population": 359783,
+      "german_share": 0.096
+    },
+    "VD": {
+      "name": "Vaud",
+      "population": 863650,
+      "german_share": 0.049
+    },
+    "VS": {
+      "name": "Valais",
+      "population": 376113,
+      "german_share": 0.24
+    },
+    "NE": {
+      "name": "Neuchâtel",
+      "population": 180365,
+      "german_share": 0.043
+    },
+    "GE": {
+      "name": "Geneva",
+      "population": 537084,
+      "german_share": 0.036
+    },
+    "JU": {
+      "name": "Jura",
+      "population": 75178,
+      "german_share": 0.074
+    }
+  },
+  "dialects": [
+    {
+      "code": "ZH",
+      "name": "Zurich German",
+      "native_name": "Züritüütsch",
+      "group": "High Alemannic",
+      "region_label": "Canton of Zurich",
+      "region_cantons": [
+        "ZH"
+      ],
+      "summary": "The largest single dialect group and the variety most often heard in national media and business. Relatively close to other Midland dialects, which makes it a common default for Swiss German systems.",
+      "features": [
+        "Initial k becomes ch: Chind = Kind, Chile = Kirche, cho = kommen",
+        "isch = ist, nöd = nicht, öppis = etwas, öpper = jemand, hüt = heute, mer = wir/man",
+        "Contractions: mitem = mit dem, uf de = auf der, d = die, e = ein/eine",
+        "Purpose clauses with zum ... z- + verb: zum go poschte = um einkaufen zu gehen",
+        "Passive with worde: isch gmacht worde = wurde gemacht"
+      ]
+    },
+    {
+      "code": "BE",
+      "name": "Bernese German",
+      "native_name": "Bärndütsch",
+      "group": "High Alemannic",
+      "region_label": "German-speaking canton of Bern",
+      "region_cantons": [
+        "BE"
+      ],
+      "summary": "Second-largest group and widely understood across Switzerland. Its l-vocalisation and nd-velarisation make it sound distinctive, but its vocabulary is close to Standard German.",
+      "features": [
+        "l before consonants or at word end becomes u: Miuch = Milch, Wäut = Welt, vüu = viel, aui = alle",
+        "nd becomes ng: hinger = hinter, Ching = Kind, angers = anders, Hung = Hund",
+        "Unstressed endings often written with ä: machä = machen",
+        "I = ich, di = dich, nid = nicht, ir = in der, gäng = immer, öppe = etwa",
+        "Relative particle wo = der/die/das: dr Maa, wo dert steit = der Mann, der dort steht"
+      ]
+    },
+    {
+      "code": "LU",
+      "name": "Lucerne German",
+      "native_name": "Luzärnertüütsch",
+      "group": "High Alemannic (Central Switzerland)",
+      "region_label": "Central Switzerland (LU, ZG, SZ, UR, OW, NW)",
+      "region_cantons": [
+        "LU",
+        "ZG",
+        "SZ",
+        "UR",
+        "OW",
+        "NW"
+      ],
+      "summary": "Represents the Central Swiss dialects around Lake Lucerne. Vowel lowering (u to o, i to e) is the most frequent source of recognition errors.",
+      "features": [
+        "u becomes o and i becomes e in many words: ond = und, onder = unter, Hond = Hund, esch = ist, em = im",
+        "de = der/den, en = eine, ide = in der, ned = nicht",
+        "seit = sagt, sell = soll, werd = wird, gsi = gewesen",
+        "Enclitic pronouns: hesch = hast du, gömmer = gehen wir"
+      ]
+    },
+    {
+      "code": "AG",
+      "name": "Aargau German",
+      "native_name": "Aargauerdütsch",
+      "group": "High Alemannic",
+      "region_label": "Canton of Aargau",
+      "region_cantons": [
+        "AG"
+      ],
+      "summary": "A transition zone between Bernese, Zurich and Basel dialects. The SwissDial speaker shows strong vowel lowering typical of the Freiamt and southern Aargau.",
+      "features": [
+        "i becomes e and u becomes o (southern Aargau/Freiamt): emmer = immer, met = mit, esch = ist, om = um, ond = und",
+        "Enclitic pronouns: heter = hat er, hesch = hast du, chas = kann es",
+        "bem = beim, öpper = jemand, gha = gehabt, gsi = gewesen",
+        "Initial ch for k: Chind = Kind, Chopf = Kopf"
+      ]
+    },
+    {
+      "code": "SG",
+      "name": "St. Gallen German",
+      "native_name": "Sanggallertüütsch",
+      "group": "High Alemannic (Eastern Switzerland)",
+      "region_label": "Eastern Switzerland (SG, TG, AR, AI)",
+      "region_cantons": [
+        "SG",
+        "TG",
+        "AR",
+        "AI"
+      ],
+      "summary": "Represents the Eastern Swiss dialects. Faster speech rate and fused articles (dSchuel) are frequent sources of word-segmentation errors.",
+      "features": [
+        "Fused articles: dSchuel = die Schule, dLüt = die Leute",
+        "nöd = nicht, de = der, uf = auf, abe = hinunter, ufe = hinauf, zwüsched = zwischen",
+        "luege = schauen, schaffe = arbeiten, go = gehen",
+        "z- + verb = zu + verb: zmache = zu machen; Johr = Jahr, erscht = erste"
+      ]
+    },
+    {
+      "code": "BS",
+      "name": "Basel German",
+      "native_name": "Baseldytsch",
+      "group": "Low Alemannic",
+      "region_label": "Basel region (BS, BL)",
+      "region_cantons": [
+        "BS",
+        "BL"
+      ],
+      "summary": "The only Low Alemannic dialect in SwissDial. Unlike most Swiss dialects it keeps initial k, so its sound differs markedly from Midland varieties. Basel-Landschaft speaks related Baselbieter dialects.",
+      "features": [
+        "Initial k is kept (Kind, Kuchi = Küche) instead of ch",
+        "dr = der, d = die, e/ä = ein/eine, nit/nid = nicht, mr = mir/wir, me = man",
+        "hän = haben, goht = geht, stoht = steht, do = da/hier",
+        "Diminutive -li: Hüsli = Häuschen"
+      ]
+    },
+    {
+      "code": "GR",
+      "name": "Grisons German",
+      "native_name": "Bündnerdütsch",
+      "group": "High Alemannic",
+      "region_label": "German-speaking Grisons",
+      "region_cantons": [
+        "GR"
+      ],
+      "summary": "Chur Rhine Valley dialect with a clear, slow articulation. Characteristic a-endings and Romansh loanwords shape the transcript.",
+      "features": [
+        "Unstressed -e/-en often become -a: macha = machen, schaffa = arbeiten, luaga = schauen",
+        "ua/ia diphthongs: guat = gut, muass = muss, dia = die, ma = man",
+        "hend = haben, kunnt = kommt, gsi = gewesen, nüt = nichts",
+        "Initial k often kept rather than ch"
+      ]
+    },
+    {
+      "code": "VS",
+      "name": "Valais German",
+      "native_name": "Wallisertitsch",
+      "group": "Highest Alemannic",
+      "region_label": "Upper Valais (German-speaking Valais)",
+      "region_cantons": [
+        "VS"
+      ],
+      "summary": "The most archaic and least mutually intelligible Swiss German dialect. It keeps full vowels in endings and old verb forms, so models frequently mistranscribe or mistranslate it despite its small speaker base.",
+      "features": [
+        "Endings keep full vowels, often -u: läbu = leben, redu = reden",
+        "Plural verb forms often end in -unt or -nt",
+        "schich = sich, är = er, het = hat, nit = nicht, üs = aus, üf = auf",
+        "Diminutive -ji: Hüsji = Häuschen",
+        "Narrative perfect tense usually maps to the Standard German preterite"
+      ]
+    }
+  ]
+}

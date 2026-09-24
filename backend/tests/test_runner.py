@@ -390,5 +390,330 @@ class BenchmarkRunnerTests(unittest.TestCase):
         self.assertEqual(call_count, 1)
 
 
+class FollowUpCapturingTranscriber:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def transcribe(self, model, item, parameters, prompt, follow_up_prompt=None):
+        self.calls.append({"item": item.id, "prompt": prompt, "follow_up_prompt": follow_up_prompt})
+        return TranscriptionResponse(
+            transcript="guten tag miteinander",
+            conversation=[
+                {"role": "assistant", "pass": "dialect", "contents": ["grüessech mitenand"]},
+                {"role": "assistant", "contents": ["guten tag miteinander"]},
+            ],
+        )
+
+
+class StrategyFixture:
+    def _settings(self, root: Path) -> BenchmarkSettings:
+        (root / "clip.wav").write_bytes(b"audio")
+        (root / "models.json").write_text(
+            '[{"id":"model-a","label":"Model A","deployment":"a","description":"a"}]', encoding="utf-8"
+        )
+        records = [
+            ("be-0001", 1, "grüessech mitenand", "guten tag miteinander"),
+            ("be-0002", 2, "i ha hunger", "ich habe hunger"),
+            ("be-0003", 3, "mir gö hei", "wir gehen nach hause"),
+            ("be-dup1", 1, "grüessech zäme", "guten tag zusammen"),
+            ("zh-0004", 4, "ich han hunger", "ich habe hunger"),
+        ]
+        (root / "manifest.jsonl").write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "id": item_id,
+                        "audio_path": "clip.wav",
+                        "reference_transcript": dialect_text,
+                        "standard_german_transcript": standard_text,
+                        "source": "ETH SwissDial 1.1",
+                        "dialect": item_id[:2].upper(),
+                        "dialect_name": "Bernese German" if item_id.startswith("be") else "Zurich German",
+                        "sentence_id": sentence_id,
+                    }
+                )
+                + "\n"
+                for item_id, sentence_id, dialect_text, standard_text in records
+            ),
+            encoding="utf-8",
+        )
+        (root / "dialects.json").write_text(
+            json.dumps(
+                {
+                    "cantons": {"BE": {"name": "Bern", "population": 100, "german_share": 1}},
+                    "dialects": [
+                        {
+                            "code": "BE",
+                            "name": "Bernese German",
+                            "native_name": "Bärndütsch",
+                            "region_cantons": ["BE"],
+                            "features": ["nd becomes ng: hinger = hinter"],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return BenchmarkSettings(
+            model_registry_path=root / "models.json",
+            voice_options_path=root / "voice-options.json",
+            manifest_path=root / "manifest.jsonl",
+            database_path=root / "benchmark.sqlite3",
+            foundry_project_endpoint=None,
+            trace_enabled=False,
+            trace_sensitive_data=False,
+            trace_port=4317,
+            dialects_path=root / "dialects.json",
+        )
+
+class PromptStrategyTests(StrategyFixture, unittest.TestCase):
+    def _run(self, strategy: str, reference_mode: str) -> tuple[dict, FollowUpCapturingTranscriber]:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            settings = self._settings(Path(temp_directory))
+            transcriber = FollowUpCapturingTranscriber()
+            repository = RunRepository(settings.database_path)
+            runner = BenchmarkRunner(settings, repository, transcriber)
+            run_id = runner.create_run(
+                BenchmarkRequest(
+                    model_ids=["model-a"],
+                    item_ids=["be-0001"],
+                    reference_mode=reference_mode,
+                    strategy=strategy,
+                )
+            )
+            asyncio.run(runner.execute_run(run_id))
+            return repository.get_run(run_id), transcriber
+
+    def test_guided_translation_adds_features_and_same_dialect_examples_without_test_sentence(self) -> None:
+        run, transcriber = self._run("guided", "standard-german")
+        prompt = transcriber.calls[0]["prompt"]
+
+        self.assertEqual(run["strategy"], "guided")
+        self.assertIsNone(transcriber.calls[0]["follow_up_prompt"])
+        self.assertIn("Bärndütsch", prompt)
+        self.assertIn("hinger = hinter", prompt)
+        self.assertIn("Dialect: i ha hunger\nStandard German: ich habe hunger", prompt)
+        self.assertIn("never 'ß'", prompt)
+        self.assertNotIn("grüessech", prompt)
+        self.assertNotIn("ich han hunger", prompt)
+        self.assertEqual(run["results"][0]["word_error_rate"], 0)
+        self.assertEqual(run["results"][0]["chrf"], 1)
+
+    def test_guided_dialect_transcription_shows_spelling_examples_only(self) -> None:
+        _, transcriber = self._run("guided", "dialect")
+        prompt = transcriber.calls[0]["prompt"]
+
+        self.assertIn("- i ha hunger", prompt)
+        self.assertNotIn("ich habe hunger", prompt)
+        self.assertIn("Do not translate", prompt)
+
+    def test_two_pass_sends_dialect_prompt_then_translation_follow_up(self) -> None:
+        run, transcriber = self._run("two-pass", "standard-german")
+        call = transcriber.calls[0]
+
+        self.assertIn("Transcribe the recording verbatim in this dialect", call["prompt"])
+        self.assertIn("Now translate your dialect transcript", call["follow_up_prompt"])
+        self.assertIn("Standard German: ich habe hunger", call["follow_up_prompt"])
+        self.assertEqual(run["results"][0]["conversation"][0]["pass"], "dialect")
+
+    def test_two_pass_requires_high_german_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            settings = self._settings(Path(temp_directory))
+            runner = BenchmarkRunner(settings, RunRepository(settings.database_path), FollowUpCapturingTranscriber())
+            with self.assertRaisesRegex(ValueError, "two-pass"):
+                runner.create_run(
+                    BenchmarkRequest(model_ids=["model-a"], item_ids=["be-0001"], strategy="two-pass")
+                )
+            with self.assertRaisesRegex(ValueError, "Unsupported strategy"):
+                runner.create_run(BenchmarkRequest(model_ids=["model-a"], item_ids=["be-0001"], strategy="magic"))
+
+    def test_realtime_two_pass_reuses_session_for_translation_turn(self) -> None:
+        class TwoPassSocket:
+            def __init__(self) -> None:
+                self.sent = []
+                self.events = [
+                    {"type": "session.created"},
+                    {"type": "session.updated"},
+                    {"type": "response.output_text.delta", "delta": "grüessech"},
+                    {"type": "response.done", "response": {}},
+                    {"type": "conversation.item.added"},
+                    {"type": "response.output_text.delta", "delta": "guten tag"},
+                    {"type": "response.done", "response": {}},
+                ]
+
+            async def send(self, message: str) -> None:
+                self.sent.append(json.loads(message))
+
+            async def recv(self) -> str:
+                return json.dumps(self.events.pop(0))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args) -> None:
+                return None
+
+        socket = TwoPassSocket()
+        transcriber = RealtimeAudioTranscriber(settings=None)
+        with patch("backend.app.transcriber.websockets.connect", return_value=socket):
+            transcript, _, first_pass = asyncio.run(
+                transcriber._run_session("wss://example", "token", b"\x00" * 10, "dialect prompt", "translate now")
+            )
+
+        self.assertEqual(transcript, "guten tag")
+        self.assertEqual(first_pass, "grüessech")
+        follow_up_item = next(event for event in socket.sent if event["type"] == "conversation.item.create")
+        self.assertEqual(follow_up_item["item"]["content"][0]["text"], "translate now")
+        responses = [event for event in socket.sent if event["type"] == "response.create"]
+        self.assertEqual([event["response"]["instructions"] for event in responses], ["dialect prompt", "translate now"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+class PassAwareTranscriber:
+    def __init__(self, fail_baseline: bool = False) -> None:
+        self.prompts = []
+        self.fail_baseline = fail_baseline
+
+    async def transcribe(self, model, item, parameters, prompt, follow_up_prompt=None):
+        self.prompts.append(prompt)
+        if "Swiss Standard German translation" in prompt:
+            text = "guten tag miteinander"
+        elif "verbatim in this dialect" in prompt:
+            text = "grüessech mitenand"
+        else:
+            if self.fail_baseline:
+                raise RuntimeError("server rejected WebSocket connection: HTTP 429")
+            text = "grüessech mitenang"
+        return TranscriptionResponse(transcript=text, conversation=[])
+
+
+class FakeRefiner:
+    deployment = "fake-text-model"
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.prompts = []
+
+    async def complete(self, instructions, prompt):
+        self.prompts.append(prompt)
+        return self.answer
+
+
+class EnsembleStrategyTests(StrategyFixture, unittest.TestCase):
+    def _ensemble(self, reference_mode: str, answer: str, fail_baseline: bool = False):
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            settings = self._settings(root)
+            (root / "examples.jsonl").write_text(
+                json.dumps({"sentence_id": 90, "de": "guten tag", "dialects": {"be": "grüessech wohl"}})
+                + "\n"
+                + json.dumps({"sentence_id": 1, "de": "leak", "dialects": {"be": "grüessech leak"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            settings = BenchmarkSettings(**{**settings.__dict__, "examples_path": root / "examples.jsonl"})
+            transcriber = PassAwareTranscriber(fail_baseline)
+            refiner = FakeRefiner(answer)
+            repository = RunRepository(settings.database_path)
+            runner = BenchmarkRunner(settings, repository, transcriber, refiner)
+            run_id = runner.create_run(
+                BenchmarkRequest(
+                    model_ids=["model-a"], item_ids=["be-0001"], reference_mode=reference_mode, strategy="ensemble"
+                )
+            )
+            asyncio.run(runner.execute_run(run_id))
+            return repository.get_run(run_id), transcriber, refiner
+
+    def test_ensemble_fuses_three_realtime_hypotheses_into_high_german(self) -> None:
+        run, transcriber, refiner = self._ensemble("standard-german", "guten tag miteinander")
+        result = run["results"][0]
+
+        self.assertEqual(len(transcriber.prompts), 3)
+        self.assertEqual(result["transcript"], "guten tag miteinander")
+        self.assertEqual(result["word_error_rate"], 0)
+        self.assertIn("Swiss German transcript A: grüessech mitenand", refiner.prompts[0])
+        self.assertIn("Standard German translation A: guten tag miteinander", refiner.prompts[0])
+        self.assertNotIn("Example sentences", refiner.prompts[0])
+        passes = [entry["pass"] for entry in result["conversation"]]
+        self.assertEqual(passes, ["guided-dialect", "guided-standard", "baseline", "fusion"])
+        self.assertEqual(result["conversation"][-1]["model"], "fake-text-model")
+
+    def test_ensemble_dialect_mode_retrieves_spelling_examples_without_evaluated_sentence(self) -> None:
+        run, _, refiner = self._ensemble("dialect", "grüessech mitenand")
+        prompt = refiner.prompts[0]
+
+        self.assertEqual(run["results"][0]["word_error_rate"], 0)
+        self.assertIn("- grüessech wohl", prompt)
+        self.assertNotIn("leak", prompt)
+        self.assertIn("Swiss German transcript B: grüessech mitenang", prompt)
+        self.assertIn("Do not translate", prompt)
+
+    def test_ensemble_continues_when_one_pass_fails(self) -> None:
+        run, _, refiner = self._ensemble("standard-german", "guten tag miteinander", fail_baseline=True)
+        result = run["results"][0]
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn({"role": "system", "pass": "failed", "contents": ["baseline"]}, result["conversation"])
+        self.assertEqual(len(refiner.prompts), 1)
+
+    def test_ensemble_requires_configured_refiner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            settings = self._settings(Path(temp_directory))
+            runner = BenchmarkRunner(settings, RunRepository(settings.database_path), PassAwareTranscriber())
+            with self.assertRaisesRegex(ValueError, "BENCHMARK_REFINER_DEPLOYMENT"):
+                runner.create_run(BenchmarkRequest(model_ids=["model-a"], item_ids=["be-0001"], strategy="ensemble"))
+
+
+class ExamplePoolAndTokenTests(unittest.TestCase):
+    def test_example_pool_ranks_by_informative_overlap_and_excludes_sentence(self) -> None:
+        from backend.app.examples import ExamplePool
+
+        with tempfile.TemporaryDirectory() as temp_directory:
+            path = Path(temp_directory) / "examples.jsonl"
+            path.write_text(
+                "".join(
+                    json.dumps(record) + "\n"
+                    for record in [
+                        {"sentence_id": 1, "de": "a", "dialects": {"be": "dr Hund bället"}},
+                        {"sentence_id": 2, "de": "b", "dialects": {"be": "dr Chüngu frisst"}},
+                        {"sentence_id": 3, "de": "c", "dialects": {"be": "dr Hund schlaft"}},
+                        {"sentence_id": 4, "de": "d", "dialects": {"zh": "de Hund bellt"}},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            pool = ExamplePool.load(path)
+
+        self.assertEqual(pool.similar("BE", "dr Hund bället lut", 2), [("dr Hund bället", "a"), ("dr Hund schlaft", "c")])
+        self.assertEqual(pool.similar("be", "dr Hund bället", 1, exclude_sentence_id=1), [("dr Hund schlaft", "c")])
+        self.assertEqual(len(pool.sample("BE", "clip", 5, exclude_sentence_id="2")), 2)
+        self.assertNotIn("VS", pool)
+        self.assertIsNone(ExamplePool.load(Path("missing.jsonl")))
+
+    def test_token_cache_reuses_token_until_close_to_expiry(self) -> None:
+        import time as time_module
+        from types import SimpleNamespace
+
+        from backend.app.transcriber import TokenCache
+
+        class Credential:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_token(self, scope):
+                self.calls += 1
+                lifetime = 3600 if self.calls == 1 else 7200
+                return SimpleNamespace(token=f"token-{self.calls}", expires_on=time_module.time() + lifetime)
+
+        async def scenario():
+            cache = TokenCache()
+            cache._credential = Credential()
+            first = await cache.get("scope")
+            second = await cache.get("scope")
+            cache._tokens["scope"] = SimpleNamespace(token="stale", expires_on=time_module.time() + 60)
+            third = await cache.get("scope")
+            return first, second, third, cache._credential.calls
+
+        self.assertEqual(asyncio.run(scenario()), ("token-1", "token-1", "token-2", 2))

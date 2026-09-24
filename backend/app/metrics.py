@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import re
 import unicodedata
@@ -29,6 +30,36 @@ def normalize_transcript(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text).casefold().replace("_", " ")
     normalized = re.sub(r"[^\w\s]", " ", normalized, flags=re.UNICODE)
     return " ".join(normalized.split())
+
+
+def chrf_score(reference: str | None, hypothesis: str | None, max_order: int = 6, beta: float = 2.0) -> float | None:
+    """Return chrF (character n-gram F-score, 0-1) on normalized text; tolerant of inflection and paraphrase."""
+    if reference is None or hypothesis is None:
+        return None
+    reference_chars = normalize_transcript(reference).replace(" ", "")
+    hypothesis_chars = normalize_transcript(hypothesis).replace(" ", "")
+    if not reference_chars:
+        return None
+    if not hypothesis_chars:
+        return 0.0
+
+    precisions: list[float] = []
+    recalls: list[float] = []
+    for order in range(1, max_order + 1):
+        reference_ngrams = Counter(reference_chars[i : i + order] for i in range(len(reference_chars) - order + 1))
+        hypothesis_ngrams = Counter(hypothesis_chars[i : i + order] for i in range(len(hypothesis_chars) - order + 1))
+        if not reference_ngrams or not hypothesis_ngrams:
+            break
+        matches = sum((reference_ngrams & hypothesis_ngrams).values())
+        precisions.append(matches / sum(hypothesis_ngrams.values()))
+        recalls.append(matches / sum(reference_ngrams.values()))
+
+    precision = sum(precisions) / len(precisions)
+    recall = sum(recalls) / len(recalls)
+    if precision == 0 and recall == 0:
+        return 0.0
+    beta_squared = beta**2
+    return (1 + beta_squared) * precision * recall / (beta_squared * precision + recall)
 
 
 def _edit_distance(reference: list[str], hypothesis: list[str]) -> int:
