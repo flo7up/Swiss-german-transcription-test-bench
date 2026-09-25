@@ -32,6 +32,7 @@ const state = {
   search: '',
   selectedMetrics: ['validation', 'match', 'chrf'],
   chartMetric: 'match',
+  summaryMetric: 'match',
   sampleSize: 16,
   sampleRound: 0,
   itemLimit: utterancePageSize,
@@ -727,30 +728,38 @@ function weightedModelScore(run, modelId, property) {
 }
 
 function modelScorecards(run) {
+  const metric = state.summaryMetric === 'chrf' ? 'chrf' : 'match'
+  const otherMetric = metric === 'match' ? 'chrf' : 'match'
+  const title = metric === 'match' ? 'Mean word match' : 'Mean chrF'
+  const spokenMetric = metric === 'match' ? 'mean word match' : 'mean chrF'
   const cards = run.model_ids.map((modelId, index) => {
     const results = (run.results ?? []).filter((result) => result.model_id === modelId)
     const failed = results.filter((result) => result.status === 'failed').length
-    const match = modelScore(run, modelId, 'word_match_rate')
-    const weighted = weightedModelScore(run, modelId, 'word_match_rate')
-    const chrf = modelScore(run, modelId, 'chrf')
+    const score = modelScore(run, modelId, metricProperties[metric])
+    const weighted = weightedModelScore(run, modelId, metricProperties[metric])
+    const otherScore = modelScore(run, modelId, metricProperties[otherMetric])
     const completion = modelScore(run, modelId, 'latency_ms')
-    const width = match === null ? 0 : Math.max(0, Math.min(100, match * 100))
+    const width = score === null ? 0 : Math.max(0, Math.min(100, score * 100))
     return `<article class="scorecard">
       <div class="scorecard-main">
         <strong class="scorecard-name"><i class="score-swatch series-${index % 4}"></i>${escapeHtml(modelLabel(modelId))}</strong>
-        <span class="score-track ${match === null ? 'pending' : ''}" role="img" aria-label="${escapeHtml(`${modelLabel(modelId)}: ${match === null ? 'no word match score yet' : `${rate(match)} mean word match`}`)}"><i class="score-fill series-${index % 4}" style="width:${width}%"></i></span>
-        <strong class="score-value tone-${scoreTone(match)}">${rate(match)}</strong>
+        <span class="score-track ${score === null ? 'pending' : ''}" role="img" aria-label="${escapeHtml(`${modelLabel(modelId)}: ${score === null ? `no ${spokenMetric} score yet` : `${rate(score)} ${spokenMetric}`}`)}"><i class="score-fill series-${index % 4}" style="width:${width}%"></i></span>
+        <strong class="score-value tone-${scoreTone(score)}">${rate(score)}</strong>
       </div>
       <dl>
         <div><dt>Results</dt><dd>${results.length}${failed ? ` · <span class="text-danger">${failed} failed</span>` : ''}</dd></div>
-        <div><dt title="Mean of per-dialect match weighted by each dialect region's share of Swiss German speakers">Speaker-weighted</dt><dd>${rate(weighted)}</dd></div>
-        <div><dt>chrF</dt><dd>${rate(chrf)}</dd></div>
+        <div><dt title="Mean of per-dialect ${escapeHtml(metricDefinitions[metric].label)} weighted by each dialect region's share of Swiss German speakers">Speaker-weighted ${escapeHtml(metricDefinitions[metric].label)}</dt><dd>${rate(weighted)}</dd></div>
+        <div><dt>${escapeHtml(metricDefinitions[otherMetric].label)}</dt><dd>${rate(otherScore)}</dd></div>
         <div><dt>Completion</dt><dd>${latency(completion)}</dd></div>
       </dl>
     </article>`
   }).join('')
   return `<section class="scorecards" aria-label="Model comparison">
-    <div class="scorecards-heading"><span class="eyebrow">${run.model_ids.length > 1 ? 'Model comparison' : 'Model results'}</span><h3>Mean word match</h3><p>Scores share a 0–100% scale for direct comparison.</p></div>
+    <div class="scorecards-heading"><div><span class="eyebrow">${run.model_ids.length > 1 ? 'Model comparison' : 'Model results'}</span><h3>${title}</h3><p>Scores share a 0–100% scale for direct comparison.</p></div>
+      <div class="chart-metric-switch" role="group" aria-label="Model comparison metric">
+        ${['match', 'chrf'].map((key) => `<button type="button" data-summary-metric="${key}" aria-pressed="${metric === key}" class="${metric === key ? 'active' : ''}">${escapeHtml(metricDefinitions[key].label)}</button>`).join('')}
+      </div>
+    </div>
     <div class="score-axis" aria-hidden="true"><span>0%</span><span>50%</span><span>100%</span></div>
     ${cards}
   </section>`
@@ -1430,7 +1439,7 @@ async function toggleResultAudio(button) {
 }
 
 app.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-action], [data-run-id], [data-metric-info], [data-chart-metric], [data-view], [data-task-mode], [data-dialect-chip], [data-benchmark-dialect], [data-sample-preset]')
+  const button = event.target.closest('[data-action], [data-run-id], [data-metric-info], [data-chart-metric], [data-summary-metric], [data-view], [data-task-mode], [data-dialect-chip], [data-benchmark-dialect], [data-sample-preset]')
   if (!button || button.disabled) return
   if (button.dataset.view) setView(button.dataset.view)
   if (button.dataset.runId) void openRun(button.dataset.runId)
@@ -1446,6 +1455,10 @@ app.addEventListener('click', (event) => {
   }
   if (button.dataset.chartMetric) {
     state.chartMetric = button.dataset.chartMetric
+    render()
+  }
+  if (button.dataset.summaryMetric) {
+    state.summaryMetric = button.dataset.summaryMetric
     render()
   }
   if (button.dataset.metricInfo) {

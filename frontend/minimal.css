@@ -1218,6 +1218,13 @@ textarea:focus {
   border-bottom: 1px solid var(--cp-border);
 }
 
+.scorecards-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
 .scorecards-heading h3 {
   margin: 3px 0 4px;
   font-size: 15px;
@@ -2230,6 +2237,16 @@ details.result-error > span {
 
   .chart-heading-actions {
     justify-items: start;
+  }
+
+  .scorecards-heading {
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .scorecards-heading p {
+    margin-bottom: 0;
   }
 
   .scorecard-main {
