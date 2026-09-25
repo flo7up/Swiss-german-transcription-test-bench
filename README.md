@@ -2,28 +2,70 @@
 
 A local-first workbench for measuring how well voice-capable models understand Swiss German dialects. Pick ETH SwissDial recordings across eight dialects, choose a task (transcribe the dialect or translate to High German) and a prompting strategy, run the models, and inspect every transcript with word-level differences, WER, CER, chrF, streaming latency, and a speaker-weighted score.
 
+> **Local use only:** the dashboard API has no application login or authorization layer and can start billable model requests. Keep it bound to `127.0.0.1`; do not expose it directly to the internet or an untrusted network. CORS settings are not authentication.
+
 > **Dataset:** the recordings come from **SwissDial 1.1** by ETH Zurich, which you download separately:
 > **<https://mtc.ethz.ch/publications/open-source/swiss-dial.html>**
-> SwissDial is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). No audio or dataset text ships with this repository.
+> SwissDial is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). No audio or full dataset transcripts ship with this repository; the documentation screenshots include attributed text excerpts.
 
 ![Benchmark setup: choose task, strategy, dialects, utterances, and models](docs/images/app-overview.png)
 
 ## Highlights
 
-Measured with OpenAI Realtime 2.1 on 160 SwissDial clips (20 per dialect); see [Measured effect](#measured-effect-september-2026) for details.
+The latest full-catalog comparisons use **200 SwissDial clips, 25 per dialect**, with the **Dialect-guided** strategy. Scores below compare only clips successfully scored by **both** models within each task; see [Latest saved results](#latest-saved-results-25-september-2026) for provenance and limitations.
 
-| Task | Baseline prompt | Ensemble strategy |
-| --- | ---: | ---: |
-| Translate Swiss German → High German (word match) | 67.1% | **72.8%** |
-| Transcribe the dialect verbatim (word match) | 38.4% | **53.9%** |
+| Task | Paired clips | Realtime 2 word match | Realtime 2.1 word match |
+| --- | ---: | ---: | ---: |
+| Translate Swiss German → High German | 197 | 64.3% | **68.6%** |
+| Transcribe the dialect verbatim | 200 | 44.6% | **46.6%** |
 
-- **Ensemble strategy:** three independent Realtime passes per clip, reconciled by a text model (gpt-5.5). It improves every dialect in both tasks.
+- **Latest comparison:** Realtime 2.1 leads by 4.3 percentage points for High German and 2.0 points for dialect transcription in these paired samples. These are single-run observations, not claims of statistical significance or a universal model ranking.
+- **Ensemble experiments:** earlier 160-clip runs explored combining three independent Realtime passes with a text refiner. Their different sampling and prompting conditions are documented separately under [Measured effect](#measured-effect-september-2026).
 - **Dialect importance:** built-in estimates of how many people speak each dialect (Swiss Federal Statistical Office data), used to weight results.
-- **Transparent scoring:** every output is shown next to the reference with extra and missing words highlighted, plus the individual hypotheses behind each ensemble answer.
+- **Practical inspection:** search transcripts and errors, filter results by model, dialect, or outcome, page through large runs, reopen bookmarked results, and export the complete saved matrix.
+
+## Latest saved results (25 September 2026)
+
+These two completed runs selected the **same 200 clips** across AG, BE, BS, GR, LU, SG, VS, and ZH. Each scheduled 400 model/clip tests. They were read from local history on 25 September 2026; updating this README and its screenshots did **not** submit new inference requests.
+
+| Task | Model | Successful / attempted | Paired word match | Paired chrF | Mean paired completion |
+| --- | --- | ---: | ---: | ---: | ---: |
+| High German | Realtime 2 | 197 / 200 | 64.3% | 74.8% | 3.40 s |
+| High German | Realtime 2.1 | 200 / 200 | **68.6%** | **77.0%** | **3.16 s** |
+| Dialect transcription | Realtime 2 | 200 / 200 | 44.6% | 63.8% | 3.41 s |
+| Dialect transcription | Realtime 2.1 | 200 / 200 | **46.6%** | **65.5%** | **3.06 s** |
+
+**How these numbers are calculated.** Match is the unweighted mean of per-clip `max(0, 1 - WER)`; chrF is the mean of the app's normalized character n-gram F-score. Completion is mean end-to-end time on that same paired subset, not first-token latency. High German has 197 paired clips because Realtime 2 recorded three failed requests: one BS clip and two GR clips. Those clips are excluded from **both** models' paired averages, not counted as zero. The dialect run has no failed requests.
+
+**Paired word match by dialect** (percent; 25 pairs per dialect except High German BS: 24 and GR: 23):
+
+| Dialect | High German: Realtime 2 | High German: Realtime 2.1 | Dialect: Realtime 2 | Dialect: Realtime 2.1 |
+| --- | ---: | ---: | ---: | ---: |
+| AG | 56.8 | 64.3 | 34.4 | 39.2 |
+| BE | 69.9 | 71.4 | 34.9 | 36.3 |
+| BS | 69.9 | 75.1 | 58.1 | 59.5 |
+| GR | 74.4 | 76.2 | 44.7 | 49.6 |
+| LU | 66.5 | 69.2 | 40.4 | 43.3 |
+| SG | 66.0 | 69.4 | 58.6 | 60.3 |
+| VS | 45.5 | 52.4 | 31.2 | 31.5 |
+| ZH | 66.5 | 72.0 | 54.7 | 53.1 |
+
+**Saved-run provenance** (timestamps in Europe/Zurich, UTC+02:00):
+
+- High German: `322c8bd0-d3c6-4fce-916c-7cd205b664bd`, started **25 September 2026, 10:26:54**, `guided`, 397 successful results and 3 failures.
+- Dialect transcription: `e18b606a-b929-4192-b32d-20788aaef566`, started **24 September 2026, 22:59:52**, `guided`, 400 successful results and no failures.
+
+To inspect these runs on the originating installation, open History or `/#results/<run-id>`, then **Run setup** or **Download full CSV**. The database and audio are not distributed with the repository, so these IDs are provenance references, not publicly hosted results.
+
+**Reading the screenshots.** The UI charts use every available score for each model, rather than intersecting successful clips across models. Consequently the High German screenshot shows **68.3%** for Realtime 2.1 over 200 scored clips, while the paired table shows **68.6%** over 197. Its per-dialect bars can differ for the same reason. UI completion averages also include recorded failed-request timings; the table above uses only paired successes.
+
+**Limitations.** These are exploratory, single-run comparisons on a small balanced sample, not population-weighted headline scores or human comprehension ratings. Text similarity penalizes legitimate spelling and translation alternatives; timings include local decoding, connection overhead, and service conditions. No confidence intervals or example-pool leakage audit were newly computed for this update. Do not mix these 200-clip results with the older 160-clip strategy/model tables below. Stopped or incomplete ensemble runs are excluded from the latest comparison.
 
 ## Screenshots
 
-**200-utterance comparison.** Reopened from History, not rerun: 200 clips across eight dialects, evaluated by Realtime 2 and Realtime 2.1 (400 saved results):
+All screenshots were refreshed from the current UI on **25 September 2026**, using local saved results rather than rerunning models.
+
+**200-utterance comparison.** The latest High German run: 400 recorded results, including three failed Realtime 2 requests. These are the UI's per-model, unpaired aggregates described above:
 
 ![Saved 200-utterance Realtime comparison with horizontal model and dialect bars](docs/images/results-200-comparison.png)
 
@@ -31,19 +73,31 @@ Measured with OpenAI Realtime 2.1 on 160 SwissDial clips (20 per dialect); see [
 
 ![Horizontal model bars grouped by dialect](docs/images/results-overview.png)
 
-**Inspection.** Word-level diff against the reference, with the three Realtime hypotheses the ensemble fused:
+**Inspection.** Successful outputs from that same run, sorted by lowest word match. Search, model/dialect/outcome filters, clip IDs, and 50-row pagination make it easier to review individual mistakes:
 
-![Result table with diff highlighting and ensemble hypotheses](docs/images/results-table.png)
+![Searchable and paginated results with reference/output word differences, sorted by lowest match](docs/images/results-table.png)
+
+**History.** Find saved experiments by model, task, strategy, date, or run ID. Here the list is filtered to completed Realtime runs; completed runs can still contain failed requests:
+
+![History search and status filters with saved Realtime comparisons](docs/images/history.png)
+
+**Getting started.** Dataset, deployment, and cost guidance with a small trial selection:
+
+![Getting-started guide for local audio, deployment configuration, and a four-clip trial](docs/images/getting-started.png)
 
 **Dialects.** Estimated speakers per SwissDial dialect region, with typical features and one-click benchmarking:
 
 ![Dialect importance page](docs/images/dialects.png)
 
-**Dark mode.** Dialect transcription results:
+**Dark mode.** The latest full dialect-transcription comparison: 200 clips per model, all 400 results successful:
 
 ![Dark mode results](docs/images/dark-mode.png)
 
-<sub>Screenshots show sentences from SwissDial 1.1 (ETH Zurich, CC BY-NC 4.0) and results measured on the author's Azure deployments.</sub>
+**Mobile.** The same saved High German run at a 390px viewport. Summary cards reflow; wide result tables scroll independently:
+
+<img src="docs/images/mobile-results.png" width="390" alt="Mobile results view with completed-run totals and Realtime model scorecards">
+
+<sub>Screenshots include text excerpts from <a href="https://mtc.ethz.ch/publications/open-source/swiss-dial.html">SwissDial 1.1, ETH Zurich</a>, licensed under <a href="https://creativecommons.org/licenses/by-nc/4.0/">CC BY-NC 4.0</a>. Model outputs and word-difference annotations are generated by the benchmark on the author's Azure deployments. The software's MIT license does not replace the dataset's attribution and noncommercial requirements.</sub>
 
 The backend uses the Python [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) for Foundry-hosted audio models and a direct Azure OpenAI Realtime transport for the checked-in Realtime configurations. Audio, run history, cloud resources, and credentials are not included in the repository.
 
@@ -61,6 +115,21 @@ The backend uses the Python [Microsoft Agent Framework](https://learn.microsoft.
 - Scores model output with normalized word error rate (WER), character error rate (CER), and chrF, and highlights word-level differences against the reference.
 - Stores the complete local run history in `.runtime/benchmark.sqlite3`.
 - Provides FastAPI endpoints, a dependency-free browser UI, VS Code debugger profiles, and a Foundry Toolkit Agent Inspector task.
+
+### Using the workbench
+
+- **Getting started:** the Benchmark page explains dataset import, deployment configuration, and a small four-clip trial. Model definitions in the picker do **not** confirm that those deployments exist or that authentication works. Browsing is local; starting or resuming a run sends audio to the configured cloud services and may incur charges.
+- **Inspect results:** search reference text, model output, error text, or clip ID; combine dialect, model, and success/failure filters; sort by match or completion time. The table shows 50 results per page, with unscored rows last when sorting. Charts always summarize the whole run, and **Download full CSV** exports all saved rows, regardless of filters (including partial results during a run).
+- **Find past work:** History supports search by model, task, strategy, date, or run ID, plus filters for completed, stopped, active/paused, and runs with failures.
+- **Return to a run:** opening a run puts its ID in the URL fragment, such as `#results/<run-id>`. Bookmark or reload that URL to reopen local results without resubmitting the benchmark. The link works only against the server holding that run's local database; it does not upload or publish results.
+- **Handle interruptions:** live updates retry automatically with a visible connection warning. An accepted run stays tracked even if a subsequent read fails. Active or paused runs are surfaced on return; open one to monitor, resume, or stop it before starting another. Background updates do not interrupt audio playback or editing a field.
+- **Keyboard and mobile:** use the skip-to-content link and standard keyboard navigation. On narrow screens, the results table has its own horizontally scrollable, keyboard-focusable region; the rest of the page reflows.
+
+Frontend regression tests use Node's built-in test runner (Node 18+; no npm install required):
+
+```powershell
+node --test frontend\tests\minimal-app.test.cjs
+```
 
 ## Architecture
 
@@ -265,7 +334,7 @@ The **History** tab aggregates all persisted runs into total runs, successful re
 
 Benchmark runs and per-clip results are saved locally in `.runtime/benchmark.sqlite3` by default (or the file set by `BENCHMARK_DATABASE_PATH`). To capture a screenshot later, start the API, open **History**, select a completed run, and view its **Results**; you do not need to rerun or repay for its model requests. The saved run includes model outputs, references, scores, timings, and conversation details, and can be downloaded as CSV. Keep the database if you want to retain those results across restarts.
 
-Open a historical run to use **Download CSV** for its full settings and result matrix, or **Use this setup** to restore its available models, clips, task, strategy, parameters, and prompt into the Benchmark tab for a follow-up run.
+Open a historical run to use **Download full CSV** for its full settings and result matrix, or **Use this setup** to restore its available models, clips, task, strategy, parameters, and prompt into the Benchmark tab for a follow-up run.
 
 Every selected model and clip produces an independent result. A failed request is recorded with its error and completion time, and does not stop the remainder of the matrix.
 
@@ -306,7 +375,7 @@ These historical runs used OpenAI Realtime 2.1 on the full 160-clip catalog (20 
 - **Where to expect errors.** Valais and Aargau remain hardest. Most of their remaining errors are misheard words, not translation mistakes. Bernese and Basel German are the most reliable.
 - **Cost and speed.** The ensemble makes three Realtime calls and one text call per clip. On a capacity-1 Realtime deployment its median completion was 9 seconds per clip for High German and 20 seconds for dialect output, where the fusion prompt is longer and the run overlapped other experiments. Guided took about 3 seconds. Realtime outputs are not deterministic: the same prompt on the same clips can move a clip's score by about 15 points between runs, so compare strategies on at least 100 clips. In a smaller 45-clip run, **Two-pass** scored between baseline and guided while raising median completion time by about 65%.
 
-### Model leaderboard (September 2026)
+### Historical model leaderboard (September 2026)
 
 All audio-to-text models deployable in Microsoft Foundry, each run with the **Dialect-guided** strategy on the full 160-clip catalog (Whisper: 40-clip subset, 5 per dialect, because its Standard deployment allows few requests per minute). These exploratory runs also predate the held-out example-pool fix described above. Scores are word match on the clips that every full-catalog run completed (142 for High German, 145 for dialect); per-dialect columns in %.
 
@@ -392,11 +461,23 @@ While a benchmark is active, the primary Run button is locked and the active-run
 
 ## Development and Debugging
 
-Run all offline tests:
+Install the development requirements and run the offline checks (no Azure credentials or dataset download needed):
 
 ```powershell
-./.venv/Scripts/python.exe -m unittest discover backend/tests -v
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+$env:PYTHON_DOTENV_DISABLED = "1"
+.\.venv\Scripts\python.exe scripts\check_publication.py
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m unittest discover backend\tests -v
+node --test frontend\tests\minimal-app.test.cjs
+Remove-Item Env:PYTHON_DOTENV_DISABLED
 ```
+
+`PYTHON_DOTENV_DISABLED` prevents tests from loading local credentials from `.env`. It is only for the check session: leave it unset when running the normal app with `.env` configuration. Tests use fake inference clients and temporary data; no paid inference is required.
+
+[Offline CI](.github/workflows/ci.yml) runs these checks on Linux with Python 3.11 and Windows with Python 3.13, using Node 22 for the dependency-free frontend tests. GitHub Actions are pinned to immutable commit IDs and receive read-only repository permissions.
+
+Before publishing a commit, run `scripts/check_publication.py` and review `git diff --cached`. The publication check rejects candidate environment files, runtime databases, recordings, archives, and dependency directories, including files force-added despite `.gitignore`, and checks README screenshot references. It is a filename/asset safeguard, **not** a credential-content scanner: also use GitHub secret scanning/push protection and a local tool such as Gitleaks for secret detection. Ignoring a file does not remove it from existing Git history; exposed credentials must be revoked, not just deleted.
 
 Use `Run Benchmark API` or `Debug Swiss German Benchmark API` from VS Code for normal API work. `Debug Agent Framework with Inspector` starts the Agent Framework debug bridge and opens Foundry Toolkit Agent Inspector on port `8088`; prompt and transcript content remain excluded from tracing unless `BENCHMARK_TRACE_ENABLED=true` and `BENCHMARK_TRACE_SENSITIVE_DATA=true` are both intentionally configured.
 
@@ -410,4 +491,4 @@ Use `Run Benchmark API` or `Debug Swiss German Benchmark API` from VS Code for n
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE). Dataset licensing is independent and remains the responsibility of the dataset user.
+This project's original software is licensed under the [MIT License](LICENSE). SwissDial material, including reference-text excerpts in documentation screenshots, is **not** relicensed under MIT. See [NOTICE](NOTICE) for dataset attribution, the CC BY-NC 4.0 license, and redistribution notes. Dataset licensing is independent and remains the responsibility of the dataset user.

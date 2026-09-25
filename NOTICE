@@ -1,0 +1,26 @@
+Third-party dataset material
+===========================
+
+The MIT license applies to this project's original software. It does not
+relicense SwissDial audio, transcripts, or excerpts appearing in documentation.
+
+Dataset: SwissDial 1.1, ETH Zurich
+Source: https://mtc.ethz.ch/publications/open-source/swiss-dial.html
+Dataset license: Creative Commons Attribution-NonCommercial 4.0 International
+License text: https://creativecommons.org/licenses/by-nc/4.0/
+Publication: https://arxiv.org/abs/2103.11401
+Download agreement: https://form.jotform.com/223344961502048
+
+In addition to the license, the download agreement prohibits attempting to
+determine the identity of the speakers in the SwissDial dataset.
+
+Some screenshots in docs/images contain SwissDial reference-text excerpts,
+alongside model-generated transcripts, scores, and word-difference annotations.
+They are cropped views of the benchmark UI, not unmodified dataset files.
+Retain this attribution and the dataset's noncommercial restriction when
+redistributing material that contains those excerpts. Model outputs and UI
+annotations must not be represented as the original dataset transcripts.
+
+The repository does not redistribute the audio corpus or full transcripts.
+Download the dataset separately and comply with its terms; cite the SwissDial
+publication when using it for research.

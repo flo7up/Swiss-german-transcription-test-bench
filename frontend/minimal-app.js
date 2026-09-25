@@ -5,9 +5,12 @@ const highGermanPrompt = 'Transcribe this recording into High German. Return onl
 const dialectComparisonModelIds = ['openai-realtime-2', 'openai-realtime-2-1']
 const dialectComparisonClipsPerDialect = 2
 const utterancePageSize = 8
+const resultPageSize = 50
 let sampleSizeTimer = null
 let pointerIsDown = false
 let renderPending = false
+let pollGeneration = 0
+let runRequestGeneration = 0
 
 const state = {
   view: 'benchmark',
@@ -42,8 +45,16 @@ const state = {
   resultDialect: 'all',
   resultModel: 'all',
   resultSort: 'order',
+  resultSearch: '',
+  resultStatus: 'all',
+  resultPage: 1,
+  historySearch: '',
+  historyStatus: 'all',
   historyLimit: 10,
   message: 'Loading benchmark data...',
+  error: '',
+  pollError: '',
+  loading: true,
   starting: false,
   runControlAction: null,
   metricInfoOpen: null,
@@ -188,6 +199,15 @@ function isRunInProgress(run = state.activeRun) {
   return Boolean(run && ['queued', 'running', 'paused', 'stopping'].includes(run.status))
 }
 
+function pendingRuns() {
+  return [state.activeRun, ...state.runs.filter((run) => run.id !== state.activeRun?.id)].filter((run) => isRunInProgress(run))
+}
+
+function reportError(error, fallback) {
+  state.error = error instanceof Error ? error.message : fallback
+  state.message = state.error
+}
+
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme
   try {
@@ -209,7 +229,10 @@ async function api(path, init) {
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(body.detail ?? `Request failed with ${response.status}`)
+    const detail = Array.isArray(body.detail)
+      ? body.detail.map((entry) => `${(entry.loc ?? []).filter((part) => part !== 'body').join('.')}: ${entry.msg}`).join('; ')
+      : body.detail
+    throw new Error(typeof detail === 'string' ? detail : `Request failed with ${response.status}`)
   }
   return response.json()
 }
@@ -426,11 +449,11 @@ function header() {
       : key === 'history' && state.runs.length
         ? `<span class="tab-count">${state.runs.length}</span>`
         : ''
-    return `<button type="button" role="tab" class="tab ${state.view === key ? 'active' : ''}" aria-selected="${state.view === key}" data-view="${key}">${escapeHtml(label)}${badge}</button>`
+    return `<button type="button" class="tab ${state.view === key ? 'active' : ''}" ${state.view === key ? 'aria-current="page"' : ''} data-view="${key}" data-focus-key="nav-${key}">${escapeHtml(label)}${badge}</button>`
   }).join('')
   return `<header class="app-header">
     <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><span class="product-label">SwissDial benchmark</span><h1>Swiss German speech lab</h1></div></div>
-    <nav class="tabs" role="tablist" aria-label="Sections">${tabs}</nav>
+    <nav class="tabs" aria-label="Sections">${tabs}</nav>
     <div class="header-status"><span class="status-dot ${running ? 'busy' : ''}"></span><span class="status-text" title="${escapeHtml(state.message)}">${escapeHtml(state.message)}</span>
       <button type="button" class="icon-button" data-action="toggle-theme" aria-label="${useLightMode ? 'Use light mode' : 'Use dark mode'}" title="${useLightMode ? 'Use light mode' : 'Use dark mode'}">${useLightMode ? '&#9728;' : '&#9790;'}</button>
       <button type="button" class="icon-button" data-action="refresh" aria-label="Refresh benchmark data" title="Refresh benchmark data">&#8635;</button>
@@ -439,6 +462,19 @@ function header() {
 }
 
 // ---------- Benchmark view ----------
+
+function gettingStarted() {
+  const available = state.items.filter(itemCanRun).length
+  return `<details class="card getting-started" data-detail-key="getting-started" ${!state.runs.length || !available || !state.models.length ? 'open' : ''}>
+    <summary>Getting started <span class="muted">${available} eligible clips · ${state.models.length} model definitions</span></summary>
+    <ol class="setup-steps">
+      <li><strong>1. Bring your audio</strong><p>Download SwissDial separately or upload a manifest-and-audio ZIP below. Local audio is required; reference text enables scoring. The High German task also requires parallel High German text.</p><a href="https://mtc.ethz.ch/publications/open-source/swiss-dial.html" target="_blank" rel="noopener">Get SwissDial (CC BY-NC 4.0)</a></li>
+      <li><strong>2. Connect your deployments</strong><p>Set endpoints and authentication in <code>.env</code>, match deployment names in <code>config/models.json</code>, then restart the API. Listed models are definitions, not verified connections.</p><a href="https://github.com/flo7up/Swiss-german-transcription-test-bench#authentication-and-custom-deployments" target="_blank" rel="noopener">Configuration guide</a></li>
+      <li><strong>3. Start small, then compare</strong><p>Choose a task, a few clips, and one deployed model. Inspect errors and transcripts before scaling up. Match and chrF are text similarity scores, not human comprehension ratings.</p><button type="button" class="secondary-button" data-action="small-sample" ${available && !state.loading ? '' : 'disabled'}>Select up to 4 clips</button></li>
+    </ol>
+    <p class="muted">Browsing, listening, and filtering stay local. Starting a run sends selected audio to your configured cloud deployments and may incur charges. Ensemble uses multiple inference calls per test.</p>
+  </details>`
+}
 
 function taskPanel() {
   const modes = Object.entries(taskModes).map(([key, mode]) => (
@@ -595,7 +631,7 @@ function dialectComparisonControl() {
   const items = dialectComparisonItems()
   const dialectCount = new Set(items.map(itemDialect)).size
   const taskCount = models.length * items.length
-  const disabled = models.length !== dialectComparisonModelIds.length || dialectCount < 2 || isRunInProgress() || state.starting
+  const disabled = models.length !== dialectComparisonModelIds.length || dialectCount < 2 || pendingRuns().length || state.starting || state.loading
   return `<button type="button" class="quick-action" data-action="compare-dialects" ${disabled ? 'disabled' : ''}>
     <strong>Compare all dialects</strong><span>${models.length} models · ${dialectCount} dialects · ${taskCount} tests with the current task and strategy</span>
   </button>`
@@ -641,7 +677,7 @@ function advancedSettings() {
     : state.strategy === 'ensemble'
       ? 'The ensemble uses this prompt for its baseline pass and adds two dialect-guided passes plus a fusion step.'
       : 'The selected strategy appends dialect features, example sentences, and output rules to this prompt for each clip.'
-  return `<details class="card advanced-settings">
+  return `<details class="card advanced-settings" data-detail-key="advanced-settings">
     <summary>Prompt and parameters</summary>
     <div class="advanced-content">
       <label class="prompt-field"><span class="field-label">Base prompt</span><textarea data-prompt>${escapeHtml(state.prompt)}</textarea><small class="muted">${escapeHtml(strategyNote)}</small></label>
@@ -653,7 +689,7 @@ function advancedSettings() {
 
 function benchmarkView() {
   const selectedCount = state.selectedItemIds.length
-  return `<div class="benchmark-layout">
+  return `${gettingStarted()}<div class="benchmark-layout">
     <div class="benchmark-main">
       ${taskPanel()}
       <section class="card" aria-labelledby="utterances-title">
@@ -675,9 +711,10 @@ function benchmarkView() {
 
 function runBar() {
   const taskCount = state.selectedModelIds.length * state.selectedItemIds.length
-  const running = state.starting || isRunInProgress()
-  const runDisabled = running || !state.selectedModelIds.length || !state.selectedItemIds.length
-  const runLabel = running ? 'Benchmark running' : `Run ${taskCount} ${taskCount === 1 ? 'test' : 'tests'}`
+  const pending = pendingRuns()[0]
+  const running = state.starting || Boolean(pending)
+  const runDisabled = state.loading || running || !state.selectedModelIds.length || !state.selectedItemIds.length
+  const runLabel = state.starting ? 'Starting benchmark…' : pending ? `Run ${pending.status}` : `Run ${taskCount} ${taskCount === 1 ? 'test' : 'tests'}`
   const dialectCount = new Set(state.selectedItemIds.map((itemId) => itemDialect(itemById(itemId))).filter(Boolean)).size
   return `<div class="run-bar">
     <div class="run-bar-summary">
@@ -687,7 +724,7 @@ function runBar() {
       <span class="pill">${escapeHtml(taskModes[state.referenceMode].label)}</span>
       <span class="pill">${escapeHtml(strategyLabel(state.strategy))}</span>
     </div>
-    ${running && state.activeRun ? '<button type="button" class="secondary-button" data-view="results">View progress</button>' : ''}
+    ${pending ? `<button type="button" class="secondary-button" data-run-id="${escapeHtml(pending.id)}">View progress</button>` : ''}
     <button type="button" class="primary-button" data-action="start-run" ${runDisabled ? 'disabled' : ''}>${escapeHtml(runLabel)}</button>
   </div>`
 }
@@ -845,7 +882,7 @@ function runSetupDetails(run) {
     if (!values.length) return []
     return [`${modelLabel(modelId)}: ${values.map(([name, value]) => `${name}=${value}`).join(', ')}`]
   })
-  return `<details class="run-setup">
+  return `<details class="run-setup" data-detail-key="run-setup-${escapeHtml(run.id)}">
     <summary>Run setup</summary>
     <div><span>Models</span><strong>${escapeHtml(run.model_ids.map(modelLabel).join(', '))}</strong></div>
     <div><span>Strategy</span><strong>${escapeHtml(strategyLabel(run.strategy))}</strong></div>
@@ -859,11 +896,14 @@ function resultFilters(run) {
   const dialects = [...new Set(run.item_ids.map((itemId) => itemDialect(itemById(itemId))).filter(Boolean))].sort()
   const dialectOptions = dialects.map((code) => `<option value="${escapeHtml(code)}" ${state.resultDialect === code ? 'selected' : ''}>${escapeHtml(code)}</option>`).join('')
   const modelOptions = run.model_ids.map((modelId) => `<option value="${escapeHtml(modelId)}" ${state.resultModel === modelId ? 'selected' : ''}>${escapeHtml(modelLabel(modelId))}</option>`).join('')
-  const sorts = { order: 'Run order', worst: 'Lowest match first', best: 'Highest match first' }
+  const sorts = { order: 'Run order', worst: 'Lowest match first', best: 'Highest match first', slowest: 'Slowest first' }
   return `<div class="toolbar result-toolbar">
-    <label class="inline-field"><span>Dialect</span><select data-result-dialect><option value="all">All</option>${dialectOptions}</select></label>
-    ${run.model_ids.length > 1 ? `<label class="inline-field"><span>Model</span><select data-result-model><option value="all">All</option>${modelOptions}</select></label>` : ''}
-    <label class="inline-field"><span>Sort</span><select data-result-sort>${Object.entries(sorts).map(([key, label]) => `<option value="${key}" ${state.resultSort === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    <label class="search-field"><span class="sr-only">Search results</span><input type="search" data-result-search data-focus-key="result-search" placeholder="Search reference, output, error, or clip ID" value="${escapeHtml(state.resultSearch)}"></label>
+    <label class="inline-field"><span>Dialect</span><select data-result-dialect data-focus-key="result-dialect"><option value="all">All</option>${dialectOptions}</select></label>
+    ${run.model_ids.length > 1 ? `<label class="inline-field"><span>Model</span><select data-result-model data-focus-key="result-model"><option value="all">All</option>${modelOptions}</select></label>` : ''}
+    <label class="inline-field"><span>Sort</span><select data-result-sort data-focus-key="result-sort">${Object.entries(sorts).map(([key, label]) => `<option value="${key}" ${state.resultSort === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    <label class="inline-field"><span>Outcome</span><select data-result-status data-focus-key="result-status">${Object.entries({ all: 'All results', completed: 'Successful', failed: 'Failed' }).map(([key, label]) => `<option value="${key}" ${state.resultStatus === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    <button type="button" class="secondary-button" data-action="clear-result-filters">Reset filters</button>
     <span class="legend-inline"><mark class="diff-extra">extra</mark><del class="diff-missing">missing</del> word vs. reference</span>
   </div>`
 }
@@ -872,11 +912,42 @@ function visibleResults(run) {
   let results = [...(run.results ?? [])]
   if (state.resultDialect !== 'all') results = results.filter((result) => itemDialect(itemById(result.item_id)) === state.resultDialect)
   if (state.resultModel !== 'all') results = results.filter((result) => result.model_id === state.resultModel)
+  if (state.resultStatus !== 'all') results = results.filter((result) => result.status === state.resultStatus)
+  const query = state.resultSearch.trim().toLocaleLowerCase()
+  if (query) results = results.filter((result) => [result.item_id, result.model_label, result.reference_transcript, result.transcript, result.error].some((value) => String(value ?? '').toLocaleLowerCase().includes(query)))
   if (state.resultSort !== 'order') {
+    const property = state.resultSort === 'slowest' ? 'latency_ms' : 'word_match_rate'
     const direction = state.resultSort === 'worst' ? 1 : -1
-    results.sort((left, right) => direction * ((left.word_match_rate ?? -1) - (right.word_match_rate ?? -1)))
+    results.sort((left, right) => {
+      const a = left[property]
+      const b = right[property]
+      if (!Number.isFinite(a)) return Number.isFinite(b) ? 1 : 0
+      if (!Number.isFinite(b)) return -1
+      return direction * (a - b)
+    })
   }
   return results
+}
+
+function resetResultFilters() {
+  state.resultDialect = 'all'
+  state.resultModel = 'all'
+  state.resultStatus = 'all'
+  state.resultSearch = ''
+  state.resultSort = 'order'
+  state.resultPage = 1
+}
+
+function resultPagination(run) {
+  const count = visibleResults(run).length
+  const pages = Math.max(1, Math.ceil(count / resultPageSize))
+  state.resultPage = Math.min(state.resultPage, pages)
+  const start = count ? (state.resultPage - 1) * resultPageSize + 1 : 0
+  const end = Math.min(count, state.resultPage * resultPageSize)
+  return `<div class="result-pagination">
+    <span role="status">${start}–${end} of ${count} matching results · ${(run.results ?? []).length} total</span>
+    <div class="button-row"><button type="button" class="secondary-button" data-action="results-previous" ${state.resultPage === 1 ? 'disabled' : ''}>Previous</button><span>Page ${state.resultPage} / ${pages}</span><button type="button" class="secondary-button" data-action="results-next" ${state.resultPage === pages ? 'disabled' : ''}>Next</button></div>
+  </div>`
 }
 
 function errorMarkup(error) {
@@ -894,7 +965,7 @@ function resultRows(run) {
     return `<tr><td colspan="${columnCount}" class="table-empty">${run.results?.length ? 'No results match the current filters.' : 'Results will appear as each utterance is transcribed.'}</td></tr>`
   }
 
-  return results.map((result) => {
+  return results.slice((state.resultPage - 1) * resultPageSize, state.resultPage * resultPageSize).map((result) => {
     const item = itemById(result.item_id)
     const reference = result.reference_transcript ?? item?.reference_transcript ?? 'Reference unavailable'
     const audioUrl = `${apiBase}/api/dataset/items/${encodeURIComponent(result.item_id)}/audio`
@@ -903,7 +974,7 @@ function resultRows(run) {
     const hypotheses = (result.conversation ?? []).filter((entry) => passLabels[String(entry.pass ?? '').split('#')[0]])
     const fusionModel = (result.conversation ?? []).find((entry) => entry.pass === 'fusion')?.model
     const hypothesisBlock = hypotheses.length
-      ? `<details class="hypotheses"><summary>${hypotheses.length} hypotheses${fusionModel ? ` · fused by ${escapeHtml(fusionModel)}` : ''}</summary>${hypotheses.map((entry) => `<span><em>${escapeHtml(passLabels[String(entry.pass).split('#')[0]])}${entry.model && entry.model !== result.model_label ? ` · ${escapeHtml(entry.model)}` : ''}</em>${escapeHtml(entry.contents?.[0] ?? '')}</span>`).join('')}</details>`
+      ? `<details class="hypotheses" data-detail-key="hypotheses-${escapeHtml(result.id)}"><summary>${hypotheses.length} hypotheses${fusionModel ? ` · fused by ${escapeHtml(fusionModel)}` : ''}</summary>${hypotheses.map((entry) => `<span><em>${escapeHtml(passLabels[String(entry.pass).split('#')[0]])}${entry.model && entry.model !== result.model_label ? ` · ${escapeHtml(entry.model)}` : ''}</em>${escapeHtml(entry.contents?.[0] ?? '')}</span>`).join('')}</details>`
       : ''
     const validation = showValidation
       ? `<td class="transcript-cell">${result.status === 'failed'
@@ -916,8 +987,8 @@ function resultRows(run) {
       return `<td class="metric-cell ${tone}">${formatMetric(metric, value)}</td>`
     }).join('')
     return `<tr class="${result.status === 'failed' ? 'failed-result' : ''}">
-      <td class="result-utterance"><div class="utterance-cell"><button type="button" data-action="toggle-result-audio" data-audio-id="${playerId}" aria-label="Play utterance" title="Play utterance">&#9654;</button><span><strong>${escapeHtml(reference)}</strong><small><span class="dialect-badge small">${escapeHtml(itemDialect(item) || '–')}</span>${escapeHtml(itemDialectName(item))}</small></span><audio id="${playerId}" preload="none" src="${escapeHtml(audioUrl)}"></audio></div></td>
-      <td class="model-cell">${escapeHtml(result.model_label)}</td>${validation}${metricCells}
+      <td class="result-utterance"><div class="utterance-cell"><button type="button" data-action="toggle-result-audio" data-audio-id="${playerId}" aria-label="Play utterance" title="${item?.audio_available ? 'Play utterance' : 'Audio no longer available'}" ${item?.audio_available ? '' : 'disabled'}>&#9654;</button><span><strong>${escapeHtml(reference)}</strong><small><span class="dialect-badge small">${escapeHtml(itemDialect(item) || '–')}</span>${escapeHtml(itemDialectName(item))} · ${escapeHtml(result.item_id)}</small></span><audio id="${playerId}" preload="none" src="${escapeHtml(audioUrl)}"></audio></div></td>
+      <td class="model-cell">${escapeHtml(result.model_label)}${result.status === 'failed' && !showValidation ? errorMarkup(result.error) : ''}</td>${validation}${metricCells}
     </tr>`
   }).join('')
 }
@@ -946,9 +1017,7 @@ function resultsView() {
   const progressPanel = isRunInProgress(run)
     ? `<div class="run-progress"><div><span>${progress.completed} of ${progress.total} complete</span><strong>${progress.percent}%</strong></div><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}" aria-valuenow="${progress.completed}"><span style="width:${progress.percent}%"></span></div><div class="run-controls">${controls}</div></div>`
     : ''
-  const resultActions = !isRunInProgress(run)
-    ? `<div class="button-row"><button type="button" class="secondary-button" data-action="reuse-run">Use this setup</button><a class="secondary-button" href="${apiBase}/api/runs/${encodeURIComponent(run.id)}/export.csv" download>Download CSV</a></div>`
-    : ''
+  const resultActions = `<div class="button-row">${!isRunInProgress(run) ? '<button type="button" class="secondary-button" data-action="reuse-run">Use this setup</button>' : ''}<a class="secondary-button" href="${escapeHtml(apiBase)}/api/runs/${encodeURIComponent(run.id)}/export.csv" download title="Exports all saved results, not just filtered rows">Download full CSV</a></div>`
   const partialNote = run.status === 'stopped'
     ? `<p class="muted">This run was stopped after ${progress.completed} of ${progress.total} tests. Scores below cover only completed clips.</p>`
     : ''
@@ -963,10 +1032,12 @@ function resultsView() {
     ${partialNote}
     ${progressPanel}
     ${modelScorecards(run)}
+    <p class="results-note">Charts summarize the whole run; filters below apply only to the table. Scores exclude unscored results. Compare models on the same clips and check failures before drawing conclusions.</p>
     ${runSetupDetails(run)}
     ${dialectComparisonChart(run)}
     ${resultFilters(run)}
-    <div class="table-wrap"><table><thead><tr><th>${escapeHtml(referenceModeLabel(runReferenceMode))} reference</th><th>Model</th>${validationHeader}${metricHeaders}</tr></thead><tbody>${resultRows(run)}</tbody></table></div>
+    ${resultPagination(run)}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Benchmark results; scroll horizontally for all columns"><table><thead><tr><th>${escapeHtml(referenceModeLabel(runReferenceMode))} reference</th><th>Model</th>${validationHeader}${metricHeaders}</tr></thead><tbody>${resultRows(run)}</tbody></table></div>
   </section>`
 }
 
@@ -985,16 +1056,27 @@ function historySummaryStrip() {
   </div>`
 }
 
+function filteredRuns() {
+  const query = state.historySearch.trim().toLocaleLowerCase()
+  return state.runs.filter((run) => {
+    const matchesStatus = state.historyStatus === 'all' || (state.historyStatus === 'attention'
+      ? isRunInProgress(run)
+      : state.historyStatus === 'errors' ? run.failed_result_count > 0 || run.status === 'failed' : run.status === state.historyStatus)
+    return matchesStatus && (!query || [run.id, ...run.model_ids.map(modelLabel), referenceModeLabel(run.reference_mode), strategyLabel(run.strategy), new Date(run.started_at).toLocaleString()].some((value) => value.toLocaleLowerCase().includes(query)))
+  })
+}
+
 function historyView() {
   if (!state.runs.length) {
     return '<section class="card empty-results"><strong>No runs yet</strong><p>Completed and active runs will appear here.</p></section>'
   }
-  const rows = state.runs.slice(0, state.historyLimit).map((run) => {
+  const runs = filteredRuns()
+  const rows = runs.slice(0, state.historyLimit).map((run) => {
     const total = run.total_task_count ?? run.model_ids.length * run.item_ids.length
     const indicator = run.indicator ?? { label: run.status, tone: 'neutral' }
     const active = state.activeRun?.id === run.id
     return `<button class="history-row ${active ? 'active' : ''}" type="button" data-run-id="${escapeHtml(run.id)}">
-      <span class="history-primary"><strong>${escapeHtml(run.model_ids.map(modelLabel).join(' vs '))}</strong><small>${new Date(run.started_at).toLocaleString()} · ${run.item_ids.length} utterances</small></span>
+      <span class="history-primary"><strong>${escapeHtml(run.model_ids.map(modelLabel).join(' vs '))}</strong><small>${new Date(run.started_at).toLocaleString()} · ${run.item_ids.length} utterances · ${escapeHtml(run.status)}${run.failed_result_count ? ` · ${run.failed_result_count} failed` : ''}</small><small>${escapeHtml(referenceModeLabel(run.reference_mode))} · ${escapeHtml(strategyLabel(run.strategy))}</small></span>
       <span class="history-tags"><span class="pill">${escapeHtml(taskModes[run.reference_mode ?? 'dialect'].label)}</span><span class="pill">${escapeHtml(strategyLabel(run.strategy))}</span></span>
       <span class="status-chip ${escapeHtml(indicator.tone)}">${escapeHtml(indicator.label)}</span>
       <span class="history-metric"><small>Match</small><strong class="tone-${scoreTone(run.average_word_match_rate)}">${rate(run.average_word_match_rate)}</strong></span>
@@ -1002,13 +1084,19 @@ function historyView() {
       <span aria-hidden="true" class="chevron">&#8250;</span>
     </button>`
   }).join('')
-  const more = state.runs.length > state.historyLimit
-    ? `<div class="list-disclosure centered"><button type="button" data-action="history-more">Show more (${state.runs.length - state.historyLimit} remaining)</button></div>`
+  const more = runs.length > state.historyLimit
+    ? `<div class="list-disclosure centered"><button type="button" data-action="history-more">Show more (${runs.length - state.historyLimit} remaining)</button></div>`
     : ''
   return `<section class="card">
     <div class="card-heading"><div><span class="eyebrow">All runs</span><h2>History</h2></div></div>
     ${historySummaryStrip()}
-    <div class="history-list">${rows}</div>${more}
+    <div class="toolbar">
+      <label class="search-field"><span class="sr-only">Search history</span><input type="search" data-history-search data-focus-key="history-search" placeholder="Search model, task, strategy, date, or run ID" value="${escapeHtml(state.historySearch)}"></label>
+      <label class="inline-field"><span>Status</span><select data-history-status data-focus-key="history-status">${Object.entries({ all: 'All runs', attention: 'Active or paused', completed: 'Completed', errors: 'With failures', stopped: 'Stopped' }).map(([key, label]) => `<option value="${key}" ${state.historyStatus === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      <button type="button" class="secondary-button" data-action="clear-history-filters">Reset filters</button>
+      <span class="muted" role="status">${runs.length} of ${state.runs.length} runs</span>
+    </div>
+    ${rows ? `<div class="history-list">${rows}</div>${more}` : '<p class="empty-state">No runs match these filters. Try another search or reset filters.</p>'}
   </section>`
 }
 
@@ -1095,6 +1183,8 @@ function dialectsView() {
 
 function render() {
   renderPending = false
+  const details = new Map([...app.querySelectorAll('details[data-detail-key]')].map((element) => [element.dataset.detailKey, element.open]))
+  const tableScroll = app.querySelector('.table-wrap')?.scrollLeft ?? 0
   const focused = document.activeElement?.dataset?.focusKey
   const selection = focused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null
   const content = state.view === 'results'
@@ -1104,7 +1194,17 @@ function render() {
       : state.view === 'dialects'
         ? dialectsView()
         : benchmarkView()
-  app.innerHTML = `<div class="app-shell">${header()}<main class="view view-${state.view}">${content}</main></div>`
+  const pending = pendingRuns()
+  const notice = state.error || state.pollError
+  app.innerHTML = `<div class="app-shell">${header()}<main id="main-content" class="view view-${state.view}" tabindex="-1">
+    ${notice ? `<div class="notice error-notice" role="alert"><span>${escapeHtml(notice)}</span><button type="button" class="secondary-button" data-action="refresh">Refresh data</button><button type="button" class="icon-button" data-action="dismiss-error" aria-label="Dismiss error">&times;</button></div>` : ''}
+    ${pending.length && !isRunInProgress() ? `<div class="notice"><span>${pending.length} active or paused run${pending.length === 1 ? '' : 's'}. Reopen to monitor, resume, or stop.</span><button type="button" class="secondary-button" data-run-id="${escapeHtml(pending[0].id)}">Open run</button></div>` : ''}
+    ${content}</main></div>`
+  for (const element of app.querySelectorAll('details[data-detail-key]')) {
+    if (details.has(element.dataset.detailKey)) element.open = details.get(element.dataset.detailKey)
+  }
+  const table = app.querySelector('.table-wrap')
+  if (table) table.scrollLeft = tableScroll
   if (focused) {
     const element = app.querySelector(`[data-focus-key="${focused}"]`)
     if (element) {
@@ -1118,7 +1218,9 @@ function render() {
 
 // Background poll updates must not replace the DOM between pointerdown and click, or the click is lost.
 function renderFromPoll() {
-  if (pointerIsDown) {
+  const interacting = app.contains(document.activeElement) && document.activeElement?.matches('input, textarea, select, summary')
+  const playing = [...app.querySelectorAll('audio')].some((audio) => !audio.paused && !audio.ended)
+  if (pointerIsDown || interacting || playing) {
     renderPending = true
     return
   }
@@ -1127,17 +1229,40 @@ function renderFromPoll() {
 
 function flushPendingRender() {
   pointerIsDown = false
-  if (renderPending) setTimeout(() => { if (renderPending && !pointerIsDown) render() }, 0)
+  if (renderPending) setTimeout(() => { if (renderPending) renderFromPoll() }, 0)
+}
+
+function writeRoute() {
+  const hash = `#${state.view}${state.view === 'results' && state.activeRun ? `/${encodeURIComponent(state.activeRun.id)}` : ''}`
+  if (location.hash !== hash) history.pushState(null, '', hash)
+}
+
+async function restoreRoute() {
+  const [view, runId] = location.hash.slice(1).split('/')
+  if (view === 'results' && runId) {
+    try {
+      await openRun(decodeURIComponent(runId), false)
+    } catch (error) {
+      reportError(error, 'Invalid run link.')
+      render()
+    }
+    return
+  }
+  ++runRequestGeneration
+  state.view = Object.hasOwn(views, view) ? view : 'benchmark'
+  render()
 }
 
 function setView(view) {
+  ++runRequestGeneration
   state.view = view
   state.metricInfoOpen = null
+  writeRoute()
   render()
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-async function refreshWorkspace() {
+async function refreshWorkspace(fromPoll = false) {
   try {
     const [models, items, runs, historySummary, instructionPresets, dialectAtlas, health] = await Promise.all([
       api('/api/models'),
@@ -1145,8 +1270,8 @@ async function refreshWorkspace() {
       api('/api/runs'),
       api('/api/runs/summary'),
       api('/api/instructions'),
-      api('/api/dialects').catch(() => null),
-      api('/api/health').catch(() => null),
+      api('/api/dialects'),
+      api('/api/health'),
     ])
     state.models = models
     state.items = items
@@ -1165,7 +1290,7 @@ async function refreshWorkspace() {
     for (const model of models) {
       state.parameterOverrides[model.id] ??= Object.fromEntries(model.parameters.map((parameter) => [parameter.name, parameter.default]))
     }
-    if (!isRunInProgress()) {
+    if (!isRunInProgress() && !state.starting) {
       state.message = !models.length
         ? 'Configure a runnable model to begin.'
         : items.length
@@ -1173,9 +1298,11 @@ async function refreshWorkspace() {
           : 'Import SwissDial utterances to begin.'
     }
   } catch (error) {
-    state.message = error instanceof Error ? error.message : 'Unable to load the benchmark.'
+    reportError(error, 'Unable to load the benchmark.')
   }
-  render()
+  state.loading = false
+  if (fromPoll) renderFromPoll()
+  else render()
 }
 
 async function uploadDataset() {
@@ -1208,67 +1335,85 @@ async function uploadDataset() {
       ? `Imported ${imported.item_count} clips from ${imported.name}. Select models and run when ready.`
       : `Imported ${imported.item_count} clips from ${imported.name}. Select a task with available references to run them.`
   } catch (error) {
-    state.message = error instanceof Error ? error.message : 'Unable to import the dataset.'
+    reportError(error, 'Unable to import the dataset.')
   } finally {
     state.uploadingDataset = false
     render()
   }
 }
 
-async function openRun(runId) {
+async function openRun(runId, updateRoute = true) {
+  const request = ++runRequestGeneration
   try {
-    state.activeRun = await api(`/api/runs/${encodeURIComponent(runId)}`)
-    state.starting = isRunInProgress()
-    state.resultDialect = 'all'
-    state.resultModel = 'all'
+    const run = await api(`/api/runs/${encodeURIComponent(runId)}`)
+    if (request !== runRequestGeneration) return
+    state.activeRun = run
+    state.pollError = ''
+    resetResultFilters()
     state.view = 'results'
+    state.message = `Run ${run.status}`
+    if (updateRoute) writeRoute()
     render()
     schedulePoll()
   } catch (error) {
-    state.message = error instanceof Error ? error.message : 'Unable to load run details.'
+    if (request !== runRequestGeneration) return
+    reportError(error, 'Unable to load run details.')
     render()
   }
 }
 
 function schedulePoll() {
-  clearInterval(state.timer)
+  clearTimeout(state.timer)
+  const generation = ++pollGeneration
   if (!isRunInProgress()) return
-  state.timer = setInterval(async () => {
+  const runId = state.activeRun.id
+  const poll = async () => {
     try {
       const previous = state.activeRun
-      state.activeRun = await api(`/api/runs/${encodeURIComponent(state.activeRun.id)}`)
+      const run = await api(`/api/runs/${encodeURIComponent(runId)}`)
+      if (generation !== pollGeneration || state.activeRun?.id !== runId) return
+      state.activeRun = run
+      const recovered = Boolean(state.pollError)
+      state.pollError = ''
       const progress = runProgress(state.activeRun)
-      state.message = `Running ${progress.completed} / ${progress.total}`
+      state.message = `${run.status} · ${progress.completed} / ${progress.total}`
       if (!isRunInProgress()) {
-        state.starting = false
         state.runControlAction = null
-        clearInterval(state.timer)
-        await refreshWorkspace()
+        await refreshWorkspace(true)
+        if (generation !== pollGeneration) return
         state.message = `Run ${state.activeRun.status}`
         renderFromPoll()
         return
       }
-      if (previous?.status === state.activeRun.status && previous?.results?.length === state.activeRun.results?.length) return
-      if (state.view !== 'results') {
+      if (!recovered && previous?.status === run.status && previous?.results?.length === run.results?.length) return
+      if (state.view !== 'results' && !recovered) {
         const statusText = app.querySelector('.status-text')
         if (statusText) statusText.textContent = state.message
         return
       }
       renderFromPoll()
     } catch (error) {
-      state.message = error instanceof Error ? error.message : 'Unable to refresh benchmark progress.'
+      if (generation !== pollGeneration || state.activeRun?.id !== runId) return
+      state.pollError = `Live updates interrupted. Retrying automatically; do not start another run. ${error instanceof Error ? error.message : 'Connection unavailable.'}`
       renderFromPoll()
+    } finally {
+      if (generation === pollGeneration && state.activeRun?.id === runId && isRunInProgress()) {
+        state.timer = setTimeout(poll, 1200)
+      }
     }
-  }, 1200)
+  }
+  state.timer = setTimeout(poll, 1200)
 }
 
 async function startRun() {
+  if (state.starting || state.loading || pendingRuns().length) return
   if (!state.selectedModelIds.length || !state.selectedItemIds.length) {
     state.message = 'Select at least one model and utterance.'
     render()
     return
   }
   state.starting = true
+  state.error = ''
   render()
   try {
     const parameterOverrides = Object.fromEntries(state.selectedModelIds.map((id) => [id, state.parameterOverrides[id] ?? {}]))
@@ -1283,17 +1428,23 @@ async function startRun() {
         strategy: state.strategy,
       }),
     })
-    state.activeRun = await api(`/api/runs/${queued.id}`)
-    state.resultDialect = 'all'
-    state.resultModel = 'all'
+    ++runRequestGeneration
+    // Track an accepted run even if the next read fails; never offer an accidental second submission.
+    state.activeRun = {
+      ...queued, model_ids: [...state.selectedModelIds], item_ids: [...state.selectedItemIds],
+      reference_mode: state.referenceMode, strategy: state.strategy, prompt: state.prompt,
+      parameters: parameterOverrides, results: [], started_at: new Date().toISOString(),
+    }
+    resetResultFilters()
     state.message = 'Benchmark running'
     state.view = 'results'
-    await refreshWorkspace()
+    writeRoute()
     schedulePoll()
+    await refreshWorkspace()
   } catch (error) {
-    state.message = error instanceof Error ? error.message : 'Unable to start the benchmark.'
+    reportError(error, 'Unable to start the benchmark.')
   } finally {
-    if (!isRunInProgress()) state.starting = false
+    state.starting = false
     render()
   }
 }
@@ -1325,21 +1476,25 @@ async function startDialectComparison() {
 }
 
 async function controlRun(action) {
-  if (!state.activeRun || !isRunInProgress()) return
+  if (!state.activeRun || !isRunInProgress() || state.runControlAction) return
+  const runId = state.activeRun.id
+  clearTimeout(state.timer)
+  ++pollGeneration
   state.runControlAction = action
   render()
   try {
-    state.activeRun = await api(`/api/runs/${encodeURIComponent(state.activeRun.id)}/${action}`, { method: 'POST' })
-    state.starting = isRunInProgress()
+    const run = await api(`/api/runs/${encodeURIComponent(runId)}/${action}`, { method: 'POST' })
+    if (state.activeRun?.id !== runId) return
+    state.activeRun = run
     state.message = action === 'pause' ? 'Benchmark paused' : action === 'resume' ? 'Benchmark resumed' : 'Stopping benchmark'
     const [runs, historySummary] = await Promise.all([api('/api/runs'), api('/api/runs/summary')])
     state.runs = runs
     state.historySummary = historySummary
-    schedulePoll()
   } catch (error) {
-    state.message = error instanceof Error ? error.message : `Unable to ${action} the benchmark.`
+    reportError(error, `Unable to ${action} the benchmark.`)
   } finally {
     state.runControlAction = null
+    schedulePoll()
     render()
   }
 }
@@ -1362,7 +1517,7 @@ async function saveInstructionPreset() {
     state.instructionPresets = [saved, ...state.instructionPresets.filter((preset) => preset.name !== saved.name)]
     state.message = `Saved prompt "${saved.name}"`
   } catch (error) {
-    state.message = error instanceof Error ? error.message : 'Unable to save the prompt.'
+    reportError(error, 'Unable to save the prompt.')
   } finally {
     state.savingInstruction = false
     render()
@@ -1397,10 +1552,13 @@ function reuseActiveRun() {
   state.strategy = state.activeRun.strategy ?? 'baseline'
   const availableItemIds = new Set(state.items.filter(itemCanRun).map((item) => item.id))
   state.selectedItemIds = state.activeRun.item_ids.filter((itemId) => availableItemIds.has(itemId))
+  state.selectedDataset = ''
+  state.search = ''
+  state.itemLimit = utterancePageSize
   const selectedDialects = [...new Set(state.selectedItemIds.map((itemId) => itemDialect(itemById(itemId))).filter(Boolean))]
   state.selectedDialect = selectedDialects.length === 1 ? selectedDialects[0] : 'all'
   syncSampleSizeToSelection()
-  state.parameterOverrides = { ...state.parameterOverrides, ...state.activeRun.parameters }
+  state.parameterOverrides = { ...state.parameterOverrides, ...structuredClone(state.activeRun.parameters ?? {}) }
   state.prompt = state.activeRun.prompt
   state.message = `Restored ${state.selectedItemIds.length} utterances and ${state.selectedModelIds.length} models`
   setView('benchmark')
@@ -1422,19 +1580,25 @@ async function toggleResultAudio(button) {
   if (!(player instanceof HTMLAudioElement)) return
   if (player.paused) {
     document.querySelectorAll('.result-utterance audio').forEach((audio) => {
-      if (audio !== player) audio.pause()
+      if (audio !== player) {
+        audio.pause()
+        const other = app.querySelector(`[data-audio-id="${audio.id}"]`)
+        if (other) { other.innerHTML = '&#9654;'; other.setAttribute('aria-label', 'Play utterance') }
+      }
     })
     try {
       await player.play()
       button.textContent = 'II'
-      player.addEventListener('ended', () => { button.innerHTML = '&#9654;' }, { once: true })
+      button.setAttribute('aria-label', 'Pause utterance')
+      player.addEventListener('ended', () => { button.innerHTML = '&#9654;'; button.setAttribute('aria-label', 'Play utterance') }, { once: true })
     } catch (error) {
-      state.message = error instanceof Error ? error.message : 'Unable to play this utterance.'
+      reportError(error, 'Unable to play this utterance.')
       render()
     }
   } else {
     player.pause()
     button.innerHTML = '&#9654;'
+    button.setAttribute('aria-label', 'Play utterance')
   }
 }
 
@@ -1467,7 +1631,13 @@ app.addEventListener('click', (event) => {
   }
   const action = button.dataset.action
   if (action === 'toggle-theme') setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark')
-  if (action === 'refresh') void refreshWorkspace()
+  if (action === 'refresh') { state.error = ''; void refreshWorkspace() }
+  if (action === 'dismiss-error') { state.error = ''; state.pollError = ''; render() }
+  if (action === 'small-sample') updateSampleSize(Math.min(4, sampleCapacity()))
+  if (action === 'clear-result-filters') { resetResultFilters(); render() }
+  if (action === 'results-previous') { state.resultPage = Math.max(1, state.resultPage - 1); render() }
+  if (action === 'results-next') { state.resultPage += 1; render() }
+  if (action === 'clear-history-filters') { state.historySearch = ''; state.historyStatus = 'all'; state.historyLimit = 10; render() }
   if (action === 'upload-dataset') void uploadDataset()
   if (action === 'resample-items') { selectSample(true); render() }
   if (action === 'clear-items') { state.selectedItemIds = []; render() }
@@ -1492,6 +1662,8 @@ app.addEventListener('click', (event) => {
 
 app.addEventListener('input', (event) => {
   const target = event.target
+  if (target.matches('[data-result-search]')) { state.resultSearch = target.value; state.resultPage = 1; render(); return }
+  if (target.matches('[data-history-search]')) { state.historySearch = target.value; state.historyLimit = 10; render(); return }
   if (target.matches('[data-search]')) {
     state.search = target.value
     state.itemLimit = utterancePageSize
@@ -1560,9 +1732,11 @@ app.addEventListener('change', (event) => {
     if (!state.selectedMetrics.includes(state.chartMetric)) state.chartMetric = selectedResultMetrics()[0] ?? 'match'
     render()
   }
-  if (target.matches('[data-result-dialect]')) { state.resultDialect = target.value; render() }
-  if (target.matches('[data-result-model]')) { state.resultModel = target.value; render() }
-  if (target.matches('[data-result-sort]')) { state.resultSort = target.value; render() }
+  if (target.matches('[data-result-dialect]')) { state.resultDialect = target.value; state.resultPage = 1; render() }
+  if (target.matches('[data-result-model]')) { state.resultModel = target.value; state.resultPage = 1; render() }
+  if (target.matches('[data-result-sort]')) { state.resultSort = target.value; state.resultPage = 1; render() }
+  if (target.matches('[data-result-status]')) { state.resultStatus = target.value; state.resultPage = 1; render() }
+  if (target.matches('[data-history-status]')) { state.historyStatus = target.value; state.historyLimit = 10; render() }
   if (target.matches('[data-sample-size]')) {
     window.clearTimeout(sampleSizeTimer)
     updateSampleSize(target.value || 1)
@@ -1591,5 +1765,18 @@ document.addEventListener('pointerdown', () => { pointerIsDown = true }, true)
 document.addEventListener('pointerup', flushPendingRender, true)
 document.addEventListener('pointercancel', flushPendingRender, true)
 window.addEventListener('blur', flushPendingRender)
+app.addEventListener('focusout', flushPendingRender)
+app.addEventListener('pause', flushPendingRender, true)
+app.addEventListener('ended', flushPendingRender, true)
+window.addEventListener('popstate', () => { void restoreRoute() })
+document.querySelector('.skip-link')?.addEventListener('click', (event) => {
+  event.preventDefault()
+  document.getElementById('main-content')?.focus()
+})
 
-void refreshWorkspace()
+async function initializeWorkspace() {
+  await refreshWorkspace()
+  await restoreRoute()
+}
+
+void initializeWorkspace()
