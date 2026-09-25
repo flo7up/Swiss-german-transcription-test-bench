@@ -23,6 +23,8 @@
   --cp-series-3: #c77700;
   --cp-diff-extra: rgba(220, 38, 38, 0.14);
   --cp-diff-missing: #b45309;
+  --cp-flag-red: #d52b1e;
+  --cp-flag-white: #ffffff;
   --cp-shadow: 0 12px 32px rgba(0, 0, 0, 0.1);
   --cp-shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.05);
   --cp-panel-strong: rgba(255, 255, 255, 0.96);
@@ -177,16 +179,31 @@ a {
 }
 
 .brand-mark {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  border-radius: 7px;
-  background: #d52b1e;
-  font-size: 22px;
-  font-weight: 800;
-  line-height: 1;
+  position: relative;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  background: var(--cp-flag-red);
+}
+
+.brand-mark::before,
+.brand-mark::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  background: var(--cp-flag-white);
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.brand-mark::before {
+  width: 20px;
+  height: 6px;
+}
+
+.brand-mark::after {
+  width: 6px;
+  height: 20px;
 }
 
 .product-label,

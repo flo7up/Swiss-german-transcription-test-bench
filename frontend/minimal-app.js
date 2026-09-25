@@ -429,7 +429,7 @@ function header() {
     return `<button type="button" role="tab" class="tab ${state.view === key ? 'active' : ''}" aria-selected="${state.view === key}" data-view="${key}">${escapeHtml(label)}${badge}</button>`
   }).join('')
   return `<header class="app-header">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">+</span><div><span class="product-label">SwissDial benchmark</span><h1>Swiss German speech lab</h1></div></div>
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div><span class="product-label">SwissDial benchmark</span><h1>Swiss German speech lab</h1></div></div>
     <nav class="tabs" role="tablist" aria-label="Sections">${tabs}</nav>
     <div class="header-status"><span class="status-dot ${running ? 'busy' : ''}"></span><span class="status-text" title="${escapeHtml(state.message)}">${escapeHtml(state.message)}</span>
       <button type="button" class="icon-button" data-action="toggle-theme" aria-label="${useLightMode ? 'Use light mode' : 'Use dark mode'}" title="${useLightMode ? 'Use light mode' : 'Use dark mode'}">${useLightMode ? '&#9728;' : '&#9790;'}</button>
