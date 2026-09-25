@@ -499,6 +499,32 @@ class PromptStrategyTests(StrategyFixture, unittest.TestCase):
         self.assertEqual(run["results"][0]["word_error_rate"], 0)
         self.assertEqual(run["results"][0]["chrf"], 1)
 
+    def test_guided_translation_uses_filtered_pool_not_other_evaluation_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            settings = self._settings(root)
+            (root / "examples.jsonl").write_text(
+                json.dumps({
+                    "sentence_id": 99, "de": "Guten Morgen",
+                    "dialects": {"be": "Guete Morge"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            settings = BenchmarkSettings(**{**settings.__dict__, "examples_path": root / "examples.jsonl"})
+            transcriber = FollowUpCapturingTranscriber()
+            repository = RunRepository(settings.database_path)
+            runner = BenchmarkRunner(settings, repository, transcriber)
+            run_id = runner.create_run(BenchmarkRequest(
+                model_ids=["model-a"], item_ids=["be-0001"],
+                reference_mode="standard-german", strategy="guided",
+            ))
+            asyncio.run(runner.execute_run(run_id))
+            prompt = transcriber.calls[0]["prompt"]
+            self.assertIn("Dialect: Guete Morge\nStandard German: Guten Morgen", prompt)
+            self.assertNotIn("i ha hunger", prompt)
+            self.assertNotIn("grüessech", prompt)
+            self.assertEqual(repository.get_run(run_id)["status"], "completed")
+
     def test_guided_dialect_transcription_shows_spelling_examples_only(self) -> None:
         _, transcriber = self._run("guided", "dialect")
         prompt = transcriber.calls[0]["prompt"]
@@ -717,3 +743,242 @@ class ExamplePoolAndTokenTests(unittest.TestCase):
             return first, second, third, cache._credential.calls
 
         self.assertEqual(asyncio.run(scenario()), ("token-1", "token-1", "token-2", 2))
+
+
+class RecoveryTests(unittest.TestCase):
+    def test_interrupted_runs_are_paused_or_stopped_on_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            repository = RunRepository(Path(temp_directory) / "benchmark.sqlite3")
+            ids = {}
+            for status in ("queued", "running", "stopping", "completed", "paused"):
+                run_id = repository.create_run(
+                    model_ids=["m"], item_ids=["i"], parameters={"m": {}}, prompt="p", reference_mode="dialect"
+                )
+                repository.set_run_status(run_id, status)
+                ids[status] = run_id
+
+            recovered = repository.recover_interrupted_runs()
+            statuses = {status: repository.get_run_status(run_id) for status, run_id in ids.items()}
+
+        self.assertEqual(recovered, 3)
+        self.assertEqual(
+            statuses,
+            {"queued": "paused", "running": "paused", "stopping": "stopped", "completed": "completed", "paused": "paused"},
+        )
+
+
+class ModelAdapterTests(unittest.TestCase):
+    def _clip(self, root: Path):
+        from backend.app.domain import DatasetItem
+
+        (root / "clip.wav").write_bytes(b"RIFFaudio")
+        return DatasetItem(id="be-0001", audio_path=root / "clip.wav", reference_transcript="x", source="s", metadata={})
+
+    def _model(self, transport: str):
+        from backend.app.domain import ModelDefinition
+
+        return ModelDefinition(id="m", label="Model", deployment="dep", description="d", capabilities=(), transport=transport)
+
+    def test_transcription_adapter_uses_deployment_route_with_prompt_as_context(self) -> None:
+        from types import SimpleNamespace
+
+        from backend.app.transcriber import TranscriptionApiTranscriber
+
+        calls = {}
+
+        class FakeAzureClient:
+            def __init__(self, **kwargs) -> None:
+                calls["client"] = kwargs
+
+                async def create(**request):
+                    calls["request"] = request
+                    return SimpleNamespace(text=" grüessech mitenand ")
+
+                self.audio = SimpleNamespace(transcriptions=SimpleNamespace(create=create))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        class Tokens:
+            async def get(self, scope):
+                return "token"
+
+        with tempfile.TemporaryDirectory() as temp_directory, patch.dict(
+            "os.environ", {"AZURE_OPENAI_ENDPOINT": "https://res.openai.azure.com/openai/v1"}
+        ), patch("openai.AsyncAzureOpenAI", FakeAzureClient):
+            item = self._clip(Path(temp_directory))
+            adapter = TranscriptionApiTranscriber(Tokens())
+            response = asyncio.run(adapter.transcribe(self._model("azure-openai-transcription"), item, {}, "context"))
+            with self.assertRaisesRegex(ValueError, "two-pass"):
+                asyncio.run(adapter.transcribe(self._model("azure-openai-transcription"), item, {}, "context", "follow"))
+
+        self.assertEqual(response.transcript, "grüessech mitenand")
+        self.assertEqual(calls["client"]["azure_endpoint"], "https://res.openai.azure.com")
+        self.assertEqual(calls["client"]["azure_ad_token"], "token")
+        self.assertEqual(calls["request"]["model"], "dep")
+        self.assertEqual(calls["request"]["prompt"], "context")
+        self.assertEqual(calls["request"]["file"][0], "clip.wav")
+
+    def test_audio_chat_adapter_streams_text_and_supports_follow_up_turn(self) -> None:
+        from types import SimpleNamespace
+
+        from backend.app.transcriber import AudioChatTranscriber
+
+        requests = []
+        answers = [["grüessech ", "mitenand"], ["guten tag ", "miteinander"]]
+
+        class Stream:
+            def __init__(self, parts) -> None:
+                self.parts = list(parts)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self.parts:
+                    raise StopAsyncIteration
+                return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=self.parts.pop(0)))])
+
+        class FakeClient:
+            def __init__(self, **kwargs) -> None:
+                async def create(**request):
+                    requests.append(request)
+                    return Stream(answers[len(requests) - 1])
+
+                self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+        class Tokens:
+            async def get(self, scope):
+                return "token"
+
+        with tempfile.TemporaryDirectory() as temp_directory, patch.dict(
+            "os.environ", {"AZURE_OPENAI_ENDPOINT": "https://res.openai.azure.com"}
+        ), patch("openai.AsyncOpenAI", FakeClient):
+            item = self._clip(Path(temp_directory))
+            response = asyncio.run(
+                AudioChatTranscriber(Tokens()).transcribe(self._model("azure-openai-audio-chat"), item, {}, "dialect", "translate")
+            )
+
+        self.assertEqual(response.transcript, "guten tag miteinander")
+        self.assertIsNotNone(response.time_to_first_token_ms)
+        audio_part = requests[0]["messages"][1]["content"][1]
+        self.assertEqual(audio_part["type"], "input_audio")
+        self.assertEqual(audio_part["input_audio"]["format"], "wav")
+        self.assertEqual(requests[1]["messages"][-2], {"role": "assistant", "content": "grüessech mitenand"})
+        self.assertEqual(requests[1]["messages"][-1], {"role": "user", "content": "translate"})
+        self.assertEqual(response.conversation[1]["pass"], "dialect")
+
+    def test_two_pass_is_rejected_for_transcription_models(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            (root / "models.json").write_text(
+                '[{"id":"stt","label":"STT","deployment":"d","description":"d","transport":"azure-openai-transcription"}]',
+                encoding="utf-8",
+            )
+            (root / "manifest.jsonl").write_text(
+                json.dumps({"id": "a", "audio_path": "a.wav", "reference_transcript": "x", "standard_german_transcript": "y", "source": "s"}) + "\n",
+                encoding="utf-8",
+            )
+            settings = BenchmarkSettings(
+                model_registry_path=root / "models.json",
+                voice_options_path=root / "v.json",
+                manifest_path=root / "manifest.jsonl",
+                database_path=root / "db.sqlite3",
+                foundry_project_endpoint=None,
+                trace_enabled=False,
+                trace_sensitive_data=False,
+                trace_port=4317,
+            )
+            runner = BenchmarkRunner(settings, RunRepository(settings.database_path), FakeTranscriber())
+            with self.assertRaisesRegex(ValueError, "conversational model"):
+                runner.create_run(
+                    BenchmarkRequest(model_ids=["stt"], item_ids=["a"], reference_mode="standard-german", strategy="two-pass")
+                )
+
+
+class MultiModelEnsembleTests(unittest.TestCase):
+    def _setup(self, root: Path):
+        (root / "clip.wav").write_bytes(b"audio")
+        (root / "models.json").write_text(
+            json.dumps(
+                [
+                    {"id": "rt", "label": "Realtime", "deployment": "rt", "description": "d", "transport": "azure-openai-realtime"},
+                    {"id": "stt", "label": "STT", "deployment": "stt", "description": "d", "transport": "azure-openai-transcription"},
+                    {
+                        "id": "mix", "label": "Mix", "deployment": "fusion", "description": "d", "transport": "ensemble",
+                        "members": [{"model": "rt", "pass": "target"}, {"model": "stt", "pass": "target"}, {"model": "stt", "pass": "dialect"}],
+                    },
+                    {"id": "bad", "label": "Bad", "deployment": "x", "description": "d", "transport": "ensemble", "members": [{"model": "mix"}]},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (root / "manifest.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": "be-0001", "audio_path": "clip.wav", "reference_transcript": "grüessech mitenand",
+                    "standard_german_transcript": "guten tag miteinander", "source": "s", "dialect": "BE",
+                    "dialect_name": "Bernese German", "sentence_id": 1,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return BenchmarkSettings(
+            model_registry_path=root / "models.json",
+            voice_options_path=root / "v.json",
+            manifest_path=root / "manifest.jsonl",
+            database_path=root / "db.sqlite3",
+            foundry_project_endpoint=None,
+            trace_enabled=False,
+            trace_sensitive_data=False,
+            trace_port=4317,
+            examples_path=root / "missing-examples.jsonl",
+        )
+
+    def test_members_are_heard_once_each_and_fused(self) -> None:
+        class MemberTranscriber:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def transcribe(self, model, item, parameters, prompt, follow_up_prompt=None):
+                dialect = "verbatim in this dialect" in prompt
+                self.calls.append((model.id, "dialect" if dialect else "standard"))
+                return TranscriptionResponse(transcript=f"{model.id}-{'ch' if dialect else 'de'}", conversation=[])
+
+        with tempfile.TemporaryDirectory() as temp_directory:
+            settings = self._setup(Path(temp_directory))
+            transcriber = MemberTranscriber()
+            refiner = FakeRefiner("guten tag miteinander")
+            repository = RunRepository(settings.database_path)
+            runner = BenchmarkRunner(settings, repository, transcriber, refiner)
+            run_id = runner.create_run(
+                BenchmarkRequest(model_ids=["mix"], item_ids=["be-0001"], reference_mode="standard-german", strategy="ensemble")
+            )
+            asyncio.run(runner.execute_run(run_id))
+            result = repository.get_run(run_id)["results"][0]
+
+        self.assertEqual(sorted(transcriber.calls), [("rt", "standard"), ("stt", "dialect"), ("stt", "standard")])
+        self.assertEqual(result["word_error_rate"], 0)
+        self.assertIn("Standard German translation A: rt-de", refiner.prompts[0])
+        self.assertIn("Standard German translation B: stt-de", refiner.prompts[0])
+        self.assertIn("Swiss German transcript A: stt-ch", refiner.prompts[0])
+        self.assertEqual([entry.get("model") for entry in result["conversation"]], ["Realtime", "STT", "STT", "fake-text-model"])
+
+    def test_multi_model_ensemble_requires_ensemble_strategy_and_valid_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_directory:
+            settings = self._setup(Path(temp_directory))
+            runner = BenchmarkRunner(settings, RunRepository(settings.database_path), FakeTranscriber(), FakeRefiner("x"))
+            with self.assertRaisesRegex(ValueError, "select the Ensemble strategy"):
+                runner.create_run(BenchmarkRequest(model_ids=["mix"], item_ids=["be-0001"], strategy="guided"))
+            with self.assertRaisesRegex(ValueError, "nested member"):
+                runner.create_run(BenchmarkRequest(model_ids=["bad"], item_ids=["be-0001"], strategy="ensemble"))

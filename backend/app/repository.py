@@ -163,6 +163,18 @@ class RunRepository:
             row = connection.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
         return row["status"] if row is not None else None
 
+    def recover_interrupted_runs(self) -> int:
+        """Pause runs whose worker died with a previous process so they can be resumed instead of hanging."""
+        with closing(self._connection()) as connection:
+            paused = connection.execute(
+                "UPDATE runs SET status = 'paused' WHERE status IN ('queued', 'running')"
+            ).rowcount
+            stopped = connection.execute(
+                "UPDATE runs SET status = 'stopped', completed_at = ? WHERE status = 'stopping'", (_timestamp(),)
+            ).rowcount
+            connection.commit()
+        return paused + stopped
+
     def control_run(self, run_id: str, action: str) -> str:
         transitions = {
             "pause": {"queued", "running"},

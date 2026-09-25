@@ -28,6 +28,8 @@ class ModelDefinition:
     capabilities: tuple[str, ...]
     transport: str = "foundry-responses"
     parameters: tuple[ParameterSpec, ...] = field(default_factory=tuple)
+    # Only for transport "ensemble": member model IDs with the pass each contributes ("target", "dialect", "standard-german").
+    members: tuple[dict[str, str], ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

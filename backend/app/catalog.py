@@ -9,10 +9,10 @@ from typing import Any
 from .domain import DatasetItem, ModelDefinition, ParameterSpec
 
 
-def load_models(path: Path) -> list[ModelDefinition]:
+def load_models(path: Path, custom_model_name: str | None = None) -> list[ModelDefinition]:
     """Load configured Foundry deployments from a JSON array."""
     raw_models = json.loads(path.read_text(encoding="utf-8"))
-    return [
+    models = [
         ModelDefinition(
             id=model["id"],
             label=model["label"],
@@ -33,9 +33,26 @@ def load_models(path: Path) -> list[ModelDefinition]:
                 )
                 for parameter in model.get("parameters", [])
             ),
+            members=tuple(
+                {"model": str(member["model"]), "pass": str(member.get("pass", "target"))}
+                for member in model.get("members", [])
+            ),
         )
         for model in raw_models
     ]
+    if custom_model_name:
+        if any(model.id == "custom-foundry-model" for model in models):
+            raise ValueError("The model registry already uses the reserved ID custom-foundry-model.")
+        models.append(
+            ModelDefinition(
+                id="custom-foundry-model",
+                label=custom_model_name,
+                deployment=custom_model_name,
+                description="Custom audio-capable Microsoft Foundry deployment.",
+                capabilities=("audio", "transcription"),
+            )
+        )
+    return models
 
 
 def load_voice_options(path: Path) -> list[dict[str, Any]]:
@@ -116,4 +133,26 @@ def load_dataset_items(manifest_path: Path) -> list[DatasetItem]:
                 metadata=metadata,
             )
         )
+    return items
+
+
+def load_all_dataset_items(manifest_path: Path, uploaded_datasets_path: Path | None = None) -> list[DatasetItem]:
+    """Combine the configured manifest with validated, separately stored uploads."""
+    manifests = [manifest_path]
+    if uploaded_datasets_path is not None and uploaded_datasets_path.exists():
+        for directory in sorted(uploaded_datasets_path.iterdir()):
+            if directory.is_dir() and not directory.name.startswith("."):
+                uploaded_manifest = directory / "manifest.jsonl"
+                if not uploaded_manifest.is_file():
+                    raise ValueError(f"Uploaded dataset has no manifest: {directory}")
+                manifests.append(uploaded_manifest)
+
+    items: list[DatasetItem] = []
+    seen: set[str] = set()
+    for path in manifests:
+        for item in load_dataset_items(path):
+            if item.id in seen:
+                raise ValueError(f"Duplicate dataset item ID: {item.id}")
+            seen.add(item.id)
+            items.append(item)
     return items

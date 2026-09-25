@@ -22,6 +22,94 @@
     "batch_runner_compatible": true
   },
   {
+    "id": "openai-realtime-2-1-mini",
+    "label": "OpenAI Realtime 2.1 mini",
+    "kind": "Azure OpenAI realtime deployment",
+    "deployment": "gpt-realtime-2.1-mini",
+    "version": "2026-07-07",
+    "availability": "Deployed",
+    "transport": "WebSocket or WebRTC",
+    "description": "Pay-per-use deployment in Sweden Central. Cost-efficient GA sibling of Realtime 2.1.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-realtime-1-5",
+    "label": "OpenAI Realtime 1.5",
+    "kind": "Azure OpenAI realtime deployment",
+    "deployment": "gpt-realtime-1.5",
+    "version": "2026-02-23",
+    "availability": "Deployed",
+    "transport": "WebSocket or WebRTC",
+    "description": "Pay-per-use deployment in Sweden Central. GA predecessor of the Realtime 2 family.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-audio-1-5",
+    "label": "OpenAI Audio 1.5",
+    "kind": "Azure OpenAI audio chat deployment",
+    "deployment": "gpt-audio-1.5",
+    "version": "2026-02-23",
+    "availability": "Deployed",
+    "transport": "Chat Completions (input_audio)",
+    "description": "Pay-per-use deployment in Sweden Central. Turn-based audio chat; follows instructions and supports follow-up turns.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-audio-mini",
+    "label": "OpenAI Audio mini",
+    "kind": "Azure OpenAI audio chat deployment",
+    "deployment": "gpt-audio-mini",
+    "version": "2025-12-15",
+    "availability": "Deployed",
+    "transport": "Chat Completions (input_audio)",
+    "description": "Pay-per-use deployment in Sweden Central. Lower-cost turn-based audio chat.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-transcribe",
+    "label": "OpenAI Transcribe",
+    "kind": "Azure OpenAI speech-to-text deployment",
+    "deployment": "gpt-transcribe",
+    "version": "2026-07-28",
+    "availability": "Deployed",
+    "transport": "REST /audio/transcriptions",
+    "description": "Pay-per-use deployment in Sweden Central. Speech-to-text; prompt acts as context.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-4o-transcribe",
+    "label": "GPT-4o Transcribe",
+    "kind": "Azure OpenAI speech-to-text deployment",
+    "deployment": "gpt-4o-transcribe",
+    "version": "2025-03-20",
+    "availability": "Deployed",
+    "transport": "REST /audio/transcriptions",
+    "description": "Pay-per-use deployment in Sweden Central. GPT-4o speech-to-text; prompt acts as context.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-4o-mini-transcribe",
+    "label": "GPT-4o mini Transcribe",
+    "kind": "Azure OpenAI speech-to-text deployment",
+    "deployment": "gpt-4o-mini-transcribe",
+    "version": "2025-12-15",
+    "availability": "Deployed",
+    "transport": "REST /audio/transcriptions",
+    "description": "Pay-per-use deployment in Sweden Central. Lower-cost GPT-4o mini speech-to-text.",
+    "batch_runner_compatible": true
+  },
+  {
+    "id": "openai-whisper",
+    "label": "Whisper",
+    "kind": "Azure OpenAI speech-to-text deployment",
+    "deployment": "whisper",
+    "version": "001",
+    "availability": "Deployed",
+    "transport": "REST /audio/transcriptions",
+    "description": "Pay-per-use deployment in Sweden Central. Classic Whisper (Standard regional deployment).",
+    "batch_runner_compatible": true
+  },
+  {
     "id": "voice-live-api",
     "label": "Voice Live API",
     "kind": "Managed Azure Speech API",

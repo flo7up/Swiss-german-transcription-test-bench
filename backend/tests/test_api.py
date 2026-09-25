@@ -203,3 +203,34 @@ class ApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StartupRecoveryTests(unittest.TestCase):
+    def test_interrupted_runs_are_recovered_on_server_start_not_on_app_creation(self) -> None:
+        from backend.app.repository import RunRepository
+
+        with tempfile.TemporaryDirectory() as temp_directory:
+            root = Path(temp_directory)
+            (root / "models.json").write_text("[]", encoding="utf-8")
+            settings = BenchmarkSettings(
+                model_registry_path=root / "models.json",
+                voice_options_path=root / "voice-options.json",
+                manifest_path=root / "manifest.jsonl",
+                database_path=root / "benchmark.sqlite3",
+                foundry_project_endpoint=None,
+                trace_enabled=False,
+                trace_sensitive_data=False,
+                trace_port=4317,
+            )
+            repository = RunRepository(settings.database_path)
+            run_id = repository.create_run(
+                model_ids=["m"], item_ids=["i"], parameters={"m": {}}, prompt="p", reference_mode="dialect"
+            )
+            repository.set_run_status(run_id, "running")
+
+            app = create_app(settings, FakeTranscriber())
+            status_after_create = repository.get_run_status(run_id)
+            with TestClient(app):
+                status_after_start = repository.get_run_status(run_id)
+
+        self.assertEqual(status_after_create, "running")
+        self.assertEqual(status_after_start, "paused")

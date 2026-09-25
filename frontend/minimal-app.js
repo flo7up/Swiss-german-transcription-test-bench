@@ -23,6 +23,10 @@ const state = {
   selectedModelIds: [],
   selectedItemIds: [],
   selectedDialect: 'all',
+  selectedDataset: '',
+  uploadFile: null,
+  uploadName: '',
+  uploadingDataset: false,
   referenceMode: 'dialect',
   strategy: 'guided',
   search: '',
@@ -258,9 +262,28 @@ function syncSampleSizeToSelection() {
   if (state.selectedItemIds.length) state.sampleSize = state.selectedItemIds.length
 }
 
+function datasetLabel(item) {
+  return item.metadata?.dataset || item.source || 'Other'
+}
+
+function datasetOptions() {
+  const counts = new Map()
+  for (const item of state.items) {
+    const label = datasetLabel(item)
+    counts.set(label, (counts.get(label) ?? 0) + 1)
+  }
+  return [...counts].sort(([left], [right]) => left.localeCompare(right))
+}
+
+function sourceFilteredItems() {
+  return state.selectedDataset === ''
+    ? state.items
+    : state.items.filter((item) => datasetLabel(item) === state.selectedDataset)
+}
+
 function availableDialects() {
   const dialects = new Map()
-  for (const item of state.items) {
+  for (const item of sourceFilteredItems()) {
     const code = itemDialect(item)
     if (!code) continue
     const entry = dialects.get(code) ?? { code, name: itemDialectName(item), count: 0 }
@@ -272,15 +295,15 @@ function availableDialects() {
 
 function dialectFilteredItems() {
   return state.selectedDialect === 'all'
-    ? state.items
-    : state.items.filter((item) => itemDialect(item) === state.selectedDialect)
+    ? sourceFilteredItems()
+    : sourceFilteredItems().filter((item) => itemDialect(item) === state.selectedDialect)
 }
 
 function filteredItems() {
   const query = state.search.trim().toLowerCase()
   const items = dialectFilteredItems()
   if (!query) return items
-  return items.filter((item) => [item.id, item.reference_transcript, item.metadata?.standard_german_transcript, item.metadata?.topic]
+  return items.filter((item) => [item.id, item.reference_transcript, item.metadata?.standard_german_transcript, item.metadata?.topic, item.source]
     .some((text) => String(text ?? '').toLowerCase().includes(query)))
 }
 
@@ -334,7 +357,7 @@ function dialectComparisonModels() {
 
 function dialectComparisonItems() {
   const groups = new Map()
-  for (const item of state.items.filter((candidate) => itemCanRun(candidate) && itemDialect(candidate))) {
+  for (const item of state.items.filter((candidate) => !candidate.metadata?.dataset && itemCanRun(candidate) && itemDialect(candidate))) {
     const dialect = itemDialect(item)
     if (!groups.has(dialect)) groups.set(dialect, [])
     groups.get(dialect).push(item)
@@ -422,10 +445,13 @@ function taskPanel() {
   )).join('')
   const strategies = Object.entries(strategyDefinitions).map(([key, strategy]) => {
     const needsRefiner = strategy.requiresRefiner && !state.health?.refiner_deployment
-    const disabled = (strategy.highGermanOnly && state.referenceMode !== 'standard-german') || needsRefiner
+    const needsConversation = key === 'two-pass' && selectedTranscriptionModels().length > 0
+    const disabled = (strategy.highGermanOnly && state.referenceMode !== 'standard-german') || needsRefiner || needsConversation
     const disabledReason = needsRefiner
       ? 'Set BENCHMARK_REFINER_DEPLOYMENT to a text deployment to enable this strategy'
-      : disabled ? 'Available when translating to High German' : ''
+      : needsConversation
+        ? `Speech-to-text models cannot hold a follow-up turn: ${selectedTranscriptionModels().map((model) => model.label).join(', ')}`
+        : disabled ? 'Available when translating to High German' : ''
     const badge = key === 'guided'
       ? '<span class="pill accent">Recommended</span>'
       : key === 'ensemble' && !needsRefiner
@@ -450,28 +476,57 @@ function dialectChips() {
     const shareLabel = share !== null && share !== undefined ? `<span class="chip-share" title="Share of Swiss German speakers in the dialect region">${(share * 100).toFixed(0)}%</span>` : ''
     return `<button type="button" class="chip ${active ? 'active' : ''}" aria-pressed="${active}" data-dialect-chip="${escapeHtml(code)}" title="${escapeHtml(label)}"><strong>${escapeHtml(code === 'all' ? 'All' : code)}</strong>${code === 'all' ? '' : `<span class="chip-name">${escapeHtml(label.replace(' German', ''))}</span>`}${shareLabel}<span class="chip-count">${count}</span></button>`
   }
-  return `<div class="chip-row" role="group" aria-label="Dialect filter">${chip('all', 'All dialects', state.items.length, null)}${dialects.map((dialect) => chip(dialect.code, dialect.name, dialect.count, dialectShare(dialect.code))).join('')}</div>`
+  return `<div class="chip-row" role="group" aria-label="Dialect filter">${chip('all', 'All dialects', sourceFilteredItems().length, null)}${dialects.map((dialect) => chip(dialect.code, dialect.name, dialect.count, dialectShare(dialect.code))).join('')}</div>`
+}
+
+function datasetControls() {
+  const sources = datasetOptions()
+  const options = sources.map(([name, count]) =>
+    `<option value="${escapeHtml(name)}" ${state.selectedDataset === name ? 'selected' : ''}>${escapeHtml(name)} (${count})</option>`
+  ).join('')
+  return `<div class="dataset-controls">
+    <label class="inline-field"><span>Data source</span><select data-dataset-filter aria-label="Data source"><option value="" ${state.selectedDataset === '' ? 'selected' : ''}>All data sources (${state.items.length})</option>${options}</select></label>
+    <details class="dataset-upload" ${state.uploadFile || state.uploadingDataset ? 'open' : ''}><summary>Upload your own audio dataset</summary>
+      <p class="muted">Choose a ZIP with <code>manifest.jsonl</code> at its root and the referenced audio under <code>clips/</code>. Each non-empty line is a JSON object with a unique <code>id</code>, relative <code>audio_path</code>, and optional <code>reference_transcript</code> for scoring. Add <code>standard_german_transcript</code> to evaluate High German.</p>
+      <pre>manifest.jsonl
+clips/clip-01.wav
+{"id":"clip-01","audio_path":"clips/clip-01.wav","reference_transcript":"grüezi","dialect":"ZH"}</pre>
+      <p class="muted">Uploads are stored alongside existing clips and are not sent to a model until you start a run. See the <a href="https://github.com/flo7up/Swiss-german-transcription-test-bench#dataset-manifest" target="_blank" rel="noopener">full format and limits</a>.</p>
+      <div class="dataset-upload-fields">
+        <label>Source name <input type="text" data-upload-name maxlength="80" placeholder="My recordings" value="${escapeHtml(state.uploadName)}"></label>
+        <label>ZIP archive <input type="file" data-dataset-file accept=".zip,application/zip"></label>
+        <button type="button" class="secondary-button" data-action="upload-dataset" ${!state.uploadFile || state.uploadingDataset ? 'disabled' : ''}>${state.uploadingDataset ? 'Importing…' : 'Import dataset'}</button>
+      </div>
+      ${state.uploadFile ? `<small class="muted">Selected: ${escapeHtml(state.uploadFile.name)}</small>` : ''}
+    </details>
+  </div>`
 }
 
 function utteranceToolbar() {
   const capacity = sampleCapacity()
   const visibleRunnable = filteredItems().filter(itemCanRun)
+  const presetSizes = [16, 40, 160, 200].filter((size) => size <= capacity)
+  if (capacity && !presetSizes.includes(capacity)) presetSizes.push(capacity)
+  const presets = presetSizes.map((size) =>
+    `<button type="button" class="sample-preset ${state.sampleSize === size ? 'active' : ''}" data-sample-preset="${size}" aria-pressed="${state.sampleSize === size}">${size === capacity ? `All ${size}` : size}</button>`
+  ).join('')
   return `<div class="toolbar">
     <label class="search-field"><span class="sr-only">Search utterances</span><input type="search" data-search data-focus-key="search" placeholder="Search text, topic, or ID" value="${escapeHtml(state.search)}"></label>
-    <label class="inline-field"><span>Sample</span><input data-sample-size data-focus-key="sample" type="number" min="1" max="${Math.max(1, capacity)}" step="1" value="${Math.min(state.sampleSize, Math.max(1, capacity))}" ${capacity ? '' : 'disabled'}></label>
+    <label class="inline-field"><span>Sample size</span><input data-sample-size data-focus-key="sample" type="number" min="1" max="${Math.max(1, capacity)}" step="1" value="${Math.min(state.sampleSize, Math.max(1, capacity))}" ${capacity ? '' : 'disabled'}></label>
+    <div class="sample-presets" role="group" aria-label="Quick sample sizes">${presets}</div>
     <button type="button" class="secondary-button" data-action="resample-items" title="Pick a new balanced sample">Resample</button>
     <button type="button" class="ghost-button" data-action="select-visible" ${visibleRunnable.length ? '' : 'disabled'}>Select ${visibleRunnable.length} shown</button>
     <button type="button" class="ghost-button" data-action="clear-items" ${state.selectedItemIds.length ? '' : 'disabled'}>Clear</button>
-  </div>`
+  </div><p class="sample-hint">${availableDialects().length ? 'Balanced across dialects' : 'Available sample'} · ${capacity} clips in this selection. Each selected model runs on every selected clip; ensembles make multiple model calls per clip.</p>`
 }
 
 function utteranceRows() {
   if (!state.items.length) {
-    return '<div class="empty-state"><strong>No utterances imported</strong><p>Run <code>scripts/import_swissdial_archive.py</code> to import SwissDial clips.</p></div>'
+    return '<div class="empty-state"><strong>No utterances imported</strong><p>Upload your own audio dataset above, or import SwissDial with <code>scripts/import_swissdial_archive.py</code>.</p></div>'
   }
   const visibleItems = filteredItems()
   if (!visibleItems.length) {
-    return '<div class="empty-state"><strong>No matching utterances</strong><p>Try another dialect or search term.</p></div>'
+    return '<div class="empty-state"><strong>No matching utterances</strong><p>Try another data source, dialect, or search term.</p></div>'
   }
 
   const rows = visibleItems.slice(0, state.itemLimit).map((item) => {
@@ -489,7 +544,7 @@ function utteranceRows() {
         <span class="utterance-copy">
           <span class="line ${primary === 'ch' ? 'primary' : ''}"><em>CH</em>${escapeHtml(swissGerman || 'Swiss German reference unavailable')}</span>
           <span class="line ${primary === 'de' ? 'primary' : ''}"><em>DE</em>${escapeHtml(highGerman || 'High German reference unavailable')}</span>
-          <small><span>${escapeHtml(itemDialectName(item))}</span>${topic}<span>${escapeHtml(item.id)}</span></small>
+          <small><span>${escapeHtml(itemDialectName(item))}</span><span>${escapeHtml(datasetLabel(item))}</span>${topic}<span>${escapeHtml(item.id)}</span></small>
         </span>
       </label>
       ${item.audio_available ? `<audio controls preload="none" src="${escapeHtml(audioUrl)}">Audio playback is not supported by this browser.</audio>` : '<span class="missing-audio">Audio unavailable</span>'}
@@ -503,15 +558,35 @@ function utteranceRows() {
   return `${rows}${disclosure}`
 }
 
+const transportGroups = {
+  'azure-openai-realtime': 'Realtime',
+  'azure-openai-audio-chat': 'Audio chat',
+  'azure-openai-transcription': 'Speech-to-text',
+  ensemble: 'Multi-model (Ensemble strategy)',
+}
+
 function modelPicker() {
   if (!state.models.length) {
     return '<p class="muted">No runnable transcription model is configured in <code>config/models.json</code>.</p>'
   }
-  return `<div class="model-options">${state.models.map((model) => {
+  const groups = new Map()
+  for (const model of state.models) {
+    const group = transportGroups[model.transport] ?? 'Foundry audio'
+    if (!groups.has(group)) groups.set(group, [])
+    groups.get(group).push(model)
+  }
+  return [...groups].map(([group, models]) => `<div class="model-group"><span class="field-label">${escapeHtml(group)}</span><div class="model-options">${models.map((model) => {
     const selected = state.selectedModelIds.includes(model.id)
-    const capability = model.capabilities.includes('realtime') ? 'Realtime' : 'Audio'
-    return `<label class="model-option ${selected ? 'selected' : ''}" title="${escapeHtml(model.description)}"><input type="checkbox" data-model-id="${escapeHtml(model.id)}" ${selected ? 'checked' : ''}><span><strong>${escapeHtml(model.label)}</strong><small>${escapeHtml(capability)} · ${escapeHtml(model.deployment)}</small></span></label>`
-  }).join('')}</div>`
+    return `<label class="model-option ${selected ? 'selected' : ''}" title="${escapeHtml(model.description)}"><input type="checkbox" data-model-id="${escapeHtml(model.id)}" ${selected ? 'checked' : ''}><span><strong>${escapeHtml(model.label)}</strong><small>${escapeHtml(model.deployment)}</small></span></label>`
+  }).join('')}</div></div>`).join('')
+}
+
+function selectedTranscriptionModels() {
+  return selectedModels().filter((model) => model.transport === 'azure-openai-transcription')
+}
+
+function isVirtualEnsemble(modelId) {
+  return state.models.find((model) => model.id === modelId)?.transport === 'ensemble'
 }
 
 function dialectComparisonControl() {
@@ -582,6 +657,7 @@ function benchmarkView() {
       ${taskPanel()}
       <section class="card" aria-labelledby="utterances-title">
         <div class="card-heading"><div><span class="eyebrow">Step 2</span><h2 id="utterances-title">Utterances</h2></div><div class="selection-count"><strong>${selectedCount}</strong> selected</div></div>
+        ${datasetControls()}
         ${dialectChips()}
         ${utteranceToolbar()}
         <div class="utterance-list">${utteranceRows()}</div>
@@ -605,7 +681,7 @@ function runBar() {
   return `<div class="run-bar">
     <div class="run-bar-summary">
       <span><strong>${state.selectedItemIds.length}</strong> utterances</span>
-      <span><strong>${dialectCount}</strong> dialects</span>
+      ${dialectCount ? `<span><strong>${dialectCount}</strong> dialects</span>` : ''}
       <span><strong>${state.selectedModelIds.length}</strong> models</span>
       <span class="pill">${escapeHtml(taskModes[state.referenceMode].label)}</span>
       <span class="pill">${escapeHtml(strategyLabel(state.strategy))}</span>
@@ -651,24 +727,33 @@ function weightedModelScore(run, modelId, property) {
 }
 
 function modelScorecards(run) {
-  const cards = run.model_ids.map((modelId) => {
+  const cards = run.model_ids.map((modelId, index) => {
     const results = (run.results ?? []).filter((result) => result.model_id === modelId)
     const failed = results.filter((result) => result.status === 'failed').length
     const match = modelScore(run, modelId, 'word_match_rate')
     const weighted = weightedModelScore(run, modelId, 'word_match_rate')
     const chrf = modelScore(run, modelId, 'chrf')
     const completion = modelScore(run, modelId, 'latency_ms')
+    const width = match === null ? 0 : Math.max(0, Math.min(100, match * 100))
     return `<article class="scorecard">
-      <header><strong>${escapeHtml(modelLabel(modelId))}</strong><span class="muted">${results.length} results${failed ? ` · <span class="text-danger">${failed} failed</span>` : ''}</span></header>
-      <div class="score-main"><span class="score-value tone-${scoreTone(match)}">${rate(match)}</span><span class="muted">mean word match</span></div>
+      <div class="scorecard-main">
+        <strong class="scorecard-name"><i class="score-swatch series-${index % 4}"></i>${escapeHtml(modelLabel(modelId))}</strong>
+        <span class="score-track ${match === null ? 'pending' : ''}" role="img" aria-label="${escapeHtml(`${modelLabel(modelId)}: ${match === null ? 'no word match score yet' : `${rate(match)} mean word match`}`)}"><i class="score-fill series-${index % 4}" style="width:${width}%"></i></span>
+        <strong class="score-value tone-${scoreTone(match)}">${rate(match)}</strong>
+      </div>
       <dl>
+        <div><dt>Results</dt><dd>${results.length}${failed ? ` · <span class="text-danger">${failed} failed</span>` : ''}</dd></div>
         <div><dt title="Mean of per-dialect match weighted by each dialect region's share of Swiss German speakers">Speaker-weighted</dt><dd>${rate(weighted)}</dd></div>
         <div><dt>chrF</dt><dd>${rate(chrf)}</dd></div>
         <div><dt>Completion</dt><dd>${latency(completion)}</dd></div>
       </dl>
     </article>`
   }).join('')
-  return `<div class="scorecards">${cards}</div>`
+  return `<section class="scorecards" aria-label="Model comparison">
+    <div class="scorecards-heading"><span class="eyebrow">${run.model_ids.length > 1 ? 'Model comparison' : 'Model results'}</span><h3>Mean word match</h3><p>Scores share a 0–100% scale for direct comparison.</p></div>
+    <div class="score-axis" aria-hidden="true"><span>0%</span><span>50%</span><span>100%</span></div>
+    ${cards}
+  </section>`
 }
 
 function niceChartMaximum(value) {
@@ -716,7 +801,7 @@ function dialectComparisonChart(run) {
   const scaleMaximum = definition.kind === 'rate'
     ? niceChartMaximum(Math.max(1, ...observedValues))
     : niceChartMaximum(Math.max(1000, ...observedValues))
-  const scaleLabels = [1, 0.75, 0.5, 0.25, 0]
+  const scaleLabels = [0, 0.5, 1]
     .map((position) => `<span>${chartValue(scaleMaximum * position, definition.kind, true)}</span>`)
     .join('')
 
@@ -726,22 +811,21 @@ function dialectComparisonChart(run) {
     : ''
   const groups = series.map(({ dialect, dialectName, models: modelSeries }) => {
     const bars = modelSeries.map(({ model, values, average }, index) => {
-      const height = average === null ? 0 : Math.max(0, Math.min(100, average / scaleMaximum * 100))
+      const width = average === null ? 0 : Math.max(0, Math.min(100, average / scaleMaximum * 100))
       const valueLabel = average === null ? (isRunInProgress(run) ? 'Pending' : 'No score') : chartValue(average, definition.kind)
       const utteranceCount = `${values.length} ${values.length === 1 ? 'utterance' : 'utterances'}`
       const accessibleLabel = `${model.label}, ${dialectName}, ${metricDefinitions[metric].label}: ${valueLabel}${values.length ? ` across ${utteranceCount}` : ''}`
-      return `<span class="chart-bar series-${index % 4} ${average === null ? 'pending' : ''}" tabindex="0" role="img" aria-label="${escapeHtml(accessibleLabel)}"><i class="chart-bar-fill" style="--bar-height:${height}%"></i><span class="chart-tooltip">${escapeHtml(model.label)}<strong>${escapeHtml(valueLabel)}</strong><small>${values.length ? utteranceCount : 'Waiting for results'}</small></span></span>`
+      return `<span class="chart-bar series-${index % 4} ${average === null ? 'pending' : ''}" tabindex="0" role="img" aria-label="${escapeHtml(accessibleLabel)}"><span class="chart-track"><i class="chart-bar-fill" style="--bar-width:${width}%"></i></span><strong class="chart-value">${escapeHtml(valueLabel)}</strong><span class="chart-tooltip">${escapeHtml(model.label)}<strong>${escapeHtml(valueLabel)}</strong><small>${values.length ? utteranceCount : 'Waiting for results'}</small></span></span>`
     }).join('')
     const share = dialectShare(dialect)
-    return `<div class="chart-group"><div class="chart-bars">${bars}</div><span class="chart-label" title="${escapeHtml(dialectName)}"><strong>${escapeHtml(dialect)}</strong>${share ? `<small>${(share * 100).toFixed(0)}% of speakers</small>` : ''}</span></div>`
+    return `<div class="chart-group"><span class="chart-label" title="${escapeHtml(dialectName)}"><strong>${escapeHtml(dialect)}</strong>${share ? `<small>${(share * 100).toFixed(0)}% of speakers</small>` : ''}</span><div class="chart-bars">${bars}</div></div>`
   }).join('')
 
   return `<section class="dialect-chart" aria-labelledby="dialect-chart-title">
-    <div class="dialect-chart-heading"><div><span class="eyebrow">${models.length > 1 ? 'Model comparison' : 'Model results'}</span><h3 id="dialect-chart-title">${escapeHtml(definition.title)}</h3><p>${escapeHtml(chartDescription)}</p></div><div class="chart-heading-actions">${metricControls}<div class="chart-legend">${legend}</div></div></div>
+    <div class="dialect-chart-heading"><div><span class="eyebrow">By dialect</span><h3 id="dialect-chart-title">${escapeHtml(definition.title)}</h3><p>${escapeHtml(chartDescription)}</p></div><div class="chart-heading-actions">${metricControls}<div class="chart-legend">${legend}</div></div></div>
     <div class="chart-scroll"><div class="chart-canvas">
       <div class="chart-scale" aria-hidden="true">${scaleLabels}</div>
-      <div class="chart-grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-      <div class="chart-groups" style="--dialect-count:${dialects.length}">${groups}</div>
+      <div class="chart-groups">${groups}</div>
     </div></div>
   </section>`
 }
@@ -807,10 +891,10 @@ function resultRows(run) {
     const audioUrl = `${apiBase}/api/dataset/items/${encodeURIComponent(result.item_id)}/audio`
     const playerId = `result-audio-${result.id}`
     const dialectPass = (result.conversation ?? []).find((entry) => entry.pass === 'dialect')?.contents?.[0]
-    const hypotheses = (result.conversation ?? []).filter((entry) => passLabels[entry.pass])
+    const hypotheses = (result.conversation ?? []).filter((entry) => passLabels[String(entry.pass ?? '').split('#')[0]])
     const fusionModel = (result.conversation ?? []).find((entry) => entry.pass === 'fusion')?.model
     const hypothesisBlock = hypotheses.length
-      ? `<details class="hypotheses"><summary>${hypotheses.length} Realtime hypotheses${fusionModel ? ` · fused by ${escapeHtml(fusionModel)}` : ''}</summary>${hypotheses.map((entry) => `<span><em>${escapeHtml(passLabels[entry.pass])}</em>${escapeHtml(entry.contents?.[0] ?? '')}</span>`).join('')}</details>`
+      ? `<details class="hypotheses"><summary>${hypotheses.length} hypotheses${fusionModel ? ` · fused by ${escapeHtml(fusionModel)}` : ''}</summary>${hypotheses.map((entry) => `<span><em>${escapeHtml(passLabels[String(entry.pass).split('#')[0]])}${entry.model && entry.model !== result.model_label ? ` · ${escapeHtml(entry.model)}` : ''}</em>${escapeHtml(entry.contents?.[0] ?? '')}</span>`).join('')}</details>`
       : ''
     const validation = showValidation
       ? `<td class="transcript-cell">${result.status === 'failed'
@@ -823,7 +907,7 @@ function resultRows(run) {
       return `<td class="metric-cell ${tone}">${formatMetric(metric, value)}</td>`
     }).join('')
     return `<tr class="${result.status === 'failed' ? 'failed-result' : ''}">
-      <td class="result-utterance"><button type="button" data-action="toggle-result-audio" data-audio-id="${playerId}" aria-label="Play utterance" title="Play utterance">&#9654;</button><span><strong>${escapeHtml(reference)}</strong><small><span class="dialect-badge small">${escapeHtml(itemDialect(item) || '–')}</span>${escapeHtml(itemDialectName(item))}</small></span><audio id="${playerId}" preload="none" src="${escapeHtml(audioUrl)}"></audio></td>
+      <td class="result-utterance"><div class="utterance-cell"><button type="button" data-action="toggle-result-audio" data-audio-id="${playerId}" aria-label="Play utterance" title="Play utterance">&#9654;</button><span><strong>${escapeHtml(reference)}</strong><small><span class="dialect-badge small">${escapeHtml(itemDialect(item) || '–')}</span>${escapeHtml(itemDialectName(item))}</small></span><audio id="${playerId}" preload="none" src="${escapeHtml(audioUrl)}"></audio></div></td>
       <td class="model-cell">${escapeHtml(result.model_label)}</td>${validation}${metricCells}
     </tr>`
   }).join('')
@@ -856,6 +940,9 @@ function resultsView() {
   const resultActions = !isRunInProgress(run)
     ? `<div class="button-row"><button type="button" class="secondary-button" data-action="reuse-run">Use this setup</button><a class="secondary-button" href="${apiBase}/api/runs/${encodeURIComponent(run.id)}/export.csv" download>Download CSV</a></div>`
     : ''
+  const partialNote = run.status === 'stopped'
+    ? `<p class="muted">This run was stopped after ${progress.completed} of ${progress.total} tests. Scores below cover only completed clips.</p>`
+    : ''
   return `<section class="card results-card">
     <div class="card-heading"><div><span class="eyebrow">${escapeHtml(new Date(run.started_at).toLocaleString())}</span><h2>${escapeHtml(taskModes[runReferenceMode].label)} · ${escapeHtml(strategyLabel(run.strategy))}</h2></div>${resultActions}</div>
     <div class="result-summary">
@@ -864,6 +951,7 @@ function resultsView() {
       <div><span>Audio</span><strong>${escapeHtml(dialectSummary || 'Unknown dialect')}</strong></div>
       <div><span>Reference</span><strong>${escapeHtml(referenceModeLabel(runReferenceMode))}</strong></div>
     </div>
+    ${partialNote}
     ${progressPanel}
     ${modelScorecards(run)}
     ${runSetupDetails(run)}
@@ -955,7 +1043,7 @@ function dialectsView() {
   }).join('')
   const uncoveredRow = `<div class="share-row muted-row">
     <span class="dialect-badge ghost">–</span>
-    <span class="share-label"><strong>Not in SwissDial</strong><small>${escapeHtml(uncovered.filter((canton) => atlas.cantons[canton.code].german_share >= 0.5).map((canton) => canton.code).join(', '))} and German speakers in bilingual and Latin cantons</small></span>
+    <span class="share-label"><strong>Not in SwissDial</strong><small title="${escapeHtml(uncovered.filter((canton) => atlas.cantons[canton.code].german_share >= 0.5).map((canton) => canton.name).join(', '))} and German speakers in bilingual and Latin cantons">${escapeHtml(uncovered.filter((canton) => atlas.cantons[canton.code].german_share >= 0.5).map((canton) => canton.code).join(', '))} and German speakers in bilingual and Latin cantons</small></span>
     <span class="share-track"><span style="width:${((1 - atlas.coverage_share) / maxShare) * 100}%"></span></span>
     <span class="share-value"><strong>${((1 - atlas.coverage_share) * 100).toFixed(1)}%</strong><small>${compactNumber(uncoveredSpeakers)}</small></span>
   </div>`
@@ -1060,6 +1148,7 @@ async function refreshWorkspace() {
     state.health = health
     if (state.strategy === 'ensemble' && !health?.refiner_deployment) state.strategy = 'guided'
     if (!state.selectedModelIds.length) state.selectedModelIds = models.slice(0, 1).map((model) => model.id)
+    if (state.selectedDataset && !datasetOptions().some(([name]) => name === state.selectedDataset)) state.selectedDataset = ''
     if (state.selectedDialect !== 'all' && !availableDialects().some(({ code }) => code === state.selectedDialect)) state.selectedDialect = 'all'
     const availableItemIds = new Set(items.filter((item) => item.audio_available).map((item) => item.id))
     state.selectedItemIds = state.selectedItemIds.filter((itemId) => availableItemIds.has(itemId))
@@ -1078,6 +1167,43 @@ async function refreshWorkspace() {
     state.message = error instanceof Error ? error.message : 'Unable to load the benchmark.'
   }
   render()
+}
+
+async function uploadDataset() {
+  if (!state.uploadFile || state.uploadingDataset) return
+  const file = state.uploadFile
+  const name = state.uploadName.trim() || file.name.replace(/\.zip$/i, '').trim()
+  if (!name || name.length > 80) {
+    state.message = 'Enter a source name of up to 80 characters.'
+    render()
+    return
+  }
+  state.uploadingDataset = true
+  state.message = `Importing ${file.name}…`
+  render()
+  try {
+    const imported = await api(`/api/datasets?name=${encodeURIComponent(name)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: file,
+    })
+    state.uploadFile = null
+    state.uploadName = ''
+    state.selectedDataset = imported.name
+    state.selectedDialect = 'all'
+    state.selectedItemIds = []
+    state.sampleSize = Math.min(16, imported.item_count)
+    state.sampleRound = 0
+    state.itemLimit = utterancePageSize
+    state.search = ''
+    await refreshWorkspace()
+    state.message = state.selectedItemIds.length
+      ? `Imported ${imported.item_count} clips from ${imported.name}. Select models and run when ready.`
+      : `Imported ${imported.item_count} clips from ${imported.name}. Select a task with available references to run them.`
+  } catch (error) {
+    state.message = error instanceof Error ? error.message : 'Unable to import the dataset.'
+  } finally {
+    state.uploadingDataset = false
+    render()
+  }
 }
 
 async function openRun(runId) {
@@ -1304,12 +1430,13 @@ async function toggleResultAudio(button) {
 }
 
 app.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-action], [data-run-id], [data-metric-info], [data-chart-metric], [data-view], [data-task-mode], [data-dialect-chip], [data-benchmark-dialect]')
+  const button = event.target.closest('[data-action], [data-run-id], [data-metric-info], [data-chart-metric], [data-view], [data-task-mode], [data-dialect-chip], [data-benchmark-dialect], [data-sample-preset]')
   if (!button || button.disabled) return
   if (button.dataset.view) setView(button.dataset.view)
   if (button.dataset.runId) void openRun(button.dataset.runId)
   if (button.dataset.taskMode) setReferenceMode(button.dataset.taskMode)
   if (button.dataset.benchmarkDialect) benchmarkDialect(button.dataset.benchmarkDialect)
+  if (button.dataset.samplePreset) updateSampleSize(button.dataset.samplePreset)
   if (button.dataset.dialectChip) {
     state.selectedDialect = button.dataset.dialectChip
     state.sampleRound = 0
@@ -1328,6 +1455,7 @@ app.addEventListener('click', (event) => {
   const action = button.dataset.action
   if (action === 'toggle-theme') setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark')
   if (action === 'refresh') void refreshWorkspace()
+  if (action === 'upload-dataset') void uploadDataset()
   if (action === 'resample-items') { selectSample(true); render() }
   if (action === 'clear-items') { state.selectedItemIds = []; render() }
   if (action === 'select-visible') {
@@ -1357,6 +1485,10 @@ app.addEventListener('input', (event) => {
     render()
     return
   }
+  if (target.matches('[data-upload-name]')) {
+    state.uploadName = target.value
+    return
+  }
   if (!target.matches('[data-sample-size]') || target.value === '') return
   window.clearTimeout(sampleSizeTimer)
   sampleSizeTimer = window.setTimeout(() => updateSampleSize(target.value), 250)
@@ -1364,10 +1496,32 @@ app.addEventListener('input', (event) => {
 
 app.addEventListener('change', (event) => {
   const target = event.target
+  if (target.matches('[data-dataset-file]')) {
+    state.uploadFile = target.files?.[0] ?? null
+    render()
+    return
+  }
+  if (target.matches('[data-dataset-filter]')) {
+    state.selectedDataset = target.value
+    state.selectedDialect = 'all'
+    state.itemLimit = utterancePageSize
+    state.sampleRound = 0
+    selectSample()
+    render()
+    return
+  }
   if (target.matches('[data-model-id]')) {
     state.selectedModelIds = target.checked
       ? [...state.selectedModelIds, target.dataset.modelId]
       : state.selectedModelIds.filter((id) => id !== target.dataset.modelId)
+    if (target.checked && isVirtualEnsemble(target.dataset.modelId) && state.strategy !== 'ensemble' && state.health?.refiner_deployment) {
+      state.strategy = 'ensemble'
+      state.message = 'Multi-model ensembles run with the Ensemble strategy'
+    }
+    if (state.strategy === 'two-pass' && selectedTranscriptionModels().length) {
+      state.strategy = 'guided'
+      state.message = 'Two-pass needs a conversational model; switched to Dialect-guided'
+    }
     render()
   }
   if (target.matches('[data-item-id]')) {
@@ -1379,6 +1533,10 @@ app.addEventListener('change', (event) => {
   }
   if (target.matches('[data-strategy]')) {
     state.strategy = target.dataset.strategy
+    if (state.strategy !== 'ensemble' && state.selectedModelIds.some(isVirtualEnsemble)) {
+      state.selectedModelIds = state.selectedModelIds.filter((id) => !isVirtualEnsemble(id))
+      state.message = 'Multi-model ensembles need the Ensemble strategy and were deselected'
+    }
     render()
   }
   if (target.matches('[data-metric-id]')) {

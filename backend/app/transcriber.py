@@ -78,16 +78,25 @@ class FoundryAudioTranscriber:
         prompt: str,
         follow_up_prompt: str | None = None,
     ) -> TranscriptionResponse:
-        if not self.settings.foundry_project_endpoint:
-            raise RuntimeError("FOUNDRY_PROJECT_ENDPOINT is required before a model run can start.")
+        if not self.settings.foundry_api_key and not self.settings.foundry_project_endpoint:
+            raise RuntimeError("FOUNDRY_PROJECT_ENDPOINT is required for Entra-authenticated Foundry model runs.")
         if not item.audio_path.is_file():
             raise FileNotFoundError(f"Audio file is unavailable: {item.audio_path}")
 
-        from agent_framework import Agent, Content, Message
+        media_type = mimetypes.guess_type(item.audio_path.name)[0] or "application/octet-stream"
+        if self.settings.foundry_api_key:
+            from agent_framework.openai import OpenAIChatClient
+            from openai import AsyncOpenAI
+
+            async with AsyncOpenAI(
+                base_url=azure_openai_base_url(), api_key=self.settings.foundry_api_key
+            ) as openai_client:
+                client = OpenAIChatClient(model=model.deployment, async_client=openai_client)
+                return await self._run(client, item, parameters, prompt, follow_up_prompt, media_type)
+
         from agent_framework.foundry import FoundryChatClient
         from azure.identity.aio import DefaultAzureCredential
 
-        media_type = mimetypes.guess_type(item.audio_path.name)[0] or "application/octet-stream"
         credential = DefaultAzureCredential()
         async with credential:
             client = FoundryChatClient(
@@ -95,37 +104,50 @@ class FoundryAudioTranscriber:
                 model=model.deployment,
                 credential=credential,
             )
-            agent = Agent(
-                client=client,
-                name="swiss-german-transcriber",
-                instructions=(
-                    "You process Swiss German audio. Follow the user's instructions exactly and return only the "
-                    "requested text, with no heading, explanation, or confidence statement."
+            return await self._run(client, item, parameters, prompt, follow_up_prompt, media_type)
+
+    @staticmethod
+    async def _run(
+        client: Any,
+        item: DatasetItem,
+        parameters: dict[str, Any],
+        prompt: str,
+        follow_up_prompt: str | None,
+        media_type: str,
+    ) -> TranscriptionResponse:
+        from agent_framework import Agent, Content, Message
+
+        agent = Agent(
+            client=client,
+            name="swiss-german-transcriber",
+            instructions=(
+                "You process Swiss German audio. Follow the user's instructions exactly and return only the "
+                "requested text, with no heading, explanation, or confidence statement."
+            ),
+            default_options=parameters,
+        )
+        message = Message(
+            role="user",
+            contents=[
+                Content.from_text(text=prompt),
+                Content.from_data(
+                    data=item.audio_path.read_bytes(),
+                    media_type=media_type,
+                    additional_properties={"filename": item.audio_path.name},
                 ),
-                default_options=parameters,
-            )
-            message = Message(
-                role="user",
-                contents=[
-                    Content.from_text(text=prompt),
-                    Content.from_data(
-                        data=item.audio_path.read_bytes(),
-                        media_type=media_type,
-                        additional_properties={"filename": item.audio_path.name},
-                    ),
-                ],
-            )
-            response = await retry_rate_limited(lambda: agent.run(message))
-            conversation = [message.to_dict() for message in response.messages]
-            if follow_up_prompt is not None:
-                first_pass = response.text.strip()
-                follow_up = Message(role="user", contents=[Content.from_text(text=follow_up_prompt)])
-                history = [message, *response.messages, follow_up]
-                response = await retry_rate_limited(lambda: agent.run(history))
-                conversation = [
-                    {"role": "assistant", "pass": "dialect", "contents": [first_pass]},
-                    *[entry.to_dict() for entry in response.messages],
-                ]
+            ],
+        )
+        response = await retry_rate_limited(lambda: agent.run(message))
+        conversation = [message.to_dict() for message in response.messages]
+        if follow_up_prompt is not None:
+            first_pass = response.text.strip()
+            follow_up = Message(role="user", contents=[Content.from_text(text=follow_up_prompt)])
+            history = [message, *response.messages, follow_up]
+            response = await retry_rate_limited(lambda: agent.run(history))
+            conversation = [
+                {"role": "assistant", "pass": "dialect", "contents": [first_pass]},
+                *[entry.to_dict() for entry in response.messages],
+            ]
 
         return TranscriptionResponse(
             transcript=response.text.strip(),
@@ -142,6 +164,7 @@ class RealtimeAudioTranscriber:
     def __init__(self, settings: BenchmarkSettings, tokens: "TokenCache | None" = None) -> None:
         self.settings = settings
         self._tokens = tokens or TokenCache()
+        self._api_key = settings.foundry_api_key if settings else None
 
     @staticmethod
     def _decode_pcm(audio_path: str) -> bytes:
@@ -176,7 +199,7 @@ class RealtimeAudioTranscriber:
         realtime_endpoint = endpoint.replace("https://", "wss://", 1).rstrip("/")
         websocket_url = f"{realtime_endpoint}/realtime?model={quote(model.deployment, safe='')}"
 
-        token = await self._tokens.get(self._TOKEN_SCOPE)
+        token = self._api_key or await self._tokens.get(self._TOKEN_SCOPE)
         transcript, time_to_first_token_ms, first_pass = await retry_rate_limited(
             lambda: self._run_session(websocket_url, token, pcm_audio, prompt, follow_up_prompt)
         )
@@ -213,7 +236,7 @@ class RealtimeAudioTranscriber:
     ) -> tuple[str, float, str | None]:
         async with websockets.connect(
             websocket_url,
-            additional_headers={"Authorization": f"Bearer {token}"},
+            additional_headers={"api-key": token} if self._api_key else {"Authorization": f"Bearer {token}"},
             max_size=2**24,
             open_timeout=20,
         ) as socket:
@@ -329,8 +352,11 @@ class RoutedAudioTranscriber:
     """Route a benchmark model to the protocol required by its transport."""
 
     def __init__(self, settings: BenchmarkSettings) -> None:
+        tokens = TokenCache()
         self.foundry = FoundryAudioTranscriber(settings)
-        self.realtime = RealtimeAudioTranscriber(settings)
+        self.realtime = RealtimeAudioTranscriber(settings, tokens)
+        self.transcription = TranscriptionApiTranscriber(tokens, settings.foundry_api_key)
+        self.audio_chat = AudioChatTranscriber(tokens, settings.foundry_api_key)
 
     async def transcribe(
         self,
@@ -342,4 +368,181 @@ class RoutedAudioTranscriber:
     ) -> TranscriptionResponse:
         if model.transport == "azure-openai-realtime":
             return await self.realtime.transcribe(model, item, parameters, prompt, follow_up_prompt)
+        if model.transport == TRANSCRIPTION_TRANSPORT:
+            return await self.transcription.transcribe(model, item, parameters, prompt, follow_up_prompt)
+        if model.transport == "azure-openai-audio-chat":
+            return await self.audio_chat.transcribe(model, item, parameters, prompt, follow_up_prompt)
         return await self.foundry.transcribe(model, item, parameters, prompt, follow_up_prompt)
+
+
+TRANSCRIPTION_TRANSPORT = "azure-openai-transcription"
+TRANSCRIPTION_API_VERSION = os.getenv("BENCHMARK_TRANSCRIPTION_API_VERSION", "2025-04-01-preview")
+_TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
+
+
+def azure_openai_resource_endpoint() -> str:
+    """Return the resource root (https://<name>.openai.azure.com) without any /openai path suffix."""
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise RuntimeError("AZURE_OPENAI_ENDPOINT is required for Azure OpenAI model runs.")
+    return endpoint.rstrip("/").split("/openai")[0]
+
+
+def azure_openai_base_url() -> str:
+    """Return the Azure OpenAI v1 base URL, accepting endpoints with or without the /openai/v1 suffix."""
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise RuntimeError("AZURE_OPENAI_ENDPOINT is required for Azure OpenAI model runs.")
+    endpoint = endpoint.rstrip("/")
+    if not endpoint.endswith("/openai/v1"):
+        endpoint += "/openai/v1"
+    return endpoint + "/"
+
+
+def _audio_media_type(path: Any) -> str:
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+class TranscriptionApiTranscriber:
+    """Send a clip to /audio/transcriptions (gpt-transcribe, gpt-4o-transcribe, whisper, ...).
+
+    Transcription models accept the prompt as context rather than as instructions, so dialect names and
+    example sentences steer vocabulary and spelling. They cannot hold a follow-up turn.
+    """
+
+    def __init__(self, tokens: TokenCache | None = None, api_key: str | None = None) -> None:
+        self._tokens = tokens or TokenCache()
+        self._api_key = api_key
+
+    async def transcribe(
+        self,
+        model: ModelDefinition,
+        item: DatasetItem,
+        parameters: dict[str, Any],
+        prompt: str,
+        follow_up_prompt: str | None = None,
+    ) -> TranscriptionResponse:
+        if follow_up_prompt is not None:
+            raise ValueError(f"{model.label} is a transcription model and cannot run a two-pass follow-up turn.")
+        if not item.audio_path.is_file():
+            raise FileNotFoundError(f"Audio file is unavailable: {item.audio_path}")
+
+        from openai import AsyncAzureOpenAI
+
+        audio = item.audio_path.read_bytes()
+        auth = {"api_key": self._api_key} if self._api_key else {"azure_ad_token": await self._tokens.get(_TOKEN_SCOPE)}
+        options = {name: value for name, value in parameters.items() if value not in (None, "")}
+        # The deployment-scoped route is used because /openai/v1/audio/transcriptions is not routed for every resource.
+        async with AsyncAzureOpenAI(
+            azure_endpoint=azure_openai_resource_endpoint(),
+            api_version=TRANSCRIPTION_API_VERSION,
+            **auth,
+        ) as client:
+            response = await retry_rate_limited(
+                lambda: client.audio.transcriptions.create(
+                    model=model.deployment,
+                    file=(item.audio_path.name, audio, _audio_media_type(item.audio_path)),
+                    prompt=prompt,
+                    **options,
+                )
+            )
+        transcript = (getattr(response, "text", None) or "").strip()
+        if not transcript:
+            raise RuntimeError(f"{model.label} returned an empty transcript.")
+        return TranscriptionResponse(
+            transcript=transcript,
+            conversation=[
+                {"role": "user", "contents": [prompt], "audio_file": item.audio_path.name, "transport": TRANSCRIPTION_TRANSPORT},
+                {"role": "assistant", "contents": [transcript]},
+            ],
+        )
+
+
+class AudioChatTranscriber:
+    """Send a clip as input_audio to a turn-based audio chat model (gpt-audio family) over Chat Completions."""
+
+    _SYSTEM = (
+        "You process Swiss German audio. Follow the user's instructions exactly and return only the requested text, "
+        "with no heading, explanation, or confidence statement."
+    )
+
+    def __init__(self, tokens: TokenCache | None = None, api_key: str | None = None) -> None:
+        self._tokens = tokens or TokenCache()
+        self._api_key = api_key
+
+    async def transcribe(
+        self,
+        model: ModelDefinition,
+        item: DatasetItem,
+        parameters: dict[str, Any],
+        prompt: str,
+        follow_up_prompt: str | None = None,
+    ) -> TranscriptionResponse:
+        if not item.audio_path.is_file():
+            raise FileNotFoundError(f"Audio file is unavailable: {item.audio_path}")
+
+        from openai import AsyncOpenAI
+
+        audio_format = item.audio_path.suffix.lstrip(".").lower() or "wav"
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._SYSTEM},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": base64.b64encode(item.audio_path.read_bytes()).decode("ascii"),
+                            "format": audio_format,
+                        },
+                    },
+                ],
+            },
+        ]
+        token = self._api_key or await self._tokens.get(_TOKEN_SCOPE)
+        options = {name: value for name, value in parameters.items() if value not in (None, "")}
+        async with AsyncOpenAI(base_url=azure_openai_base_url(), api_key=token) as client:
+            started = time.perf_counter()
+            first_text, first_token_ms = await retry_rate_limited(
+                lambda: self._stream(client, model.deployment, messages, options, started)
+            )
+            final_text, final_token_ms = first_text, first_token_ms
+            if follow_up_prompt is not None:
+                messages = [
+                    *messages,
+                    {"role": "assistant", "content": first_text},
+                    {"role": "user", "content": follow_up_prompt},
+                ]
+                final_text, final_token_ms = await retry_rate_limited(
+                    lambda: self._stream(client, model.deployment, messages, options, started)
+                )
+
+        conversation: list[dict[str, Any]] = [
+            {"role": "user", "contents": [prompt], "audio_file": item.audio_path.name, "transport": "azure-openai-audio-chat"}
+        ]
+        if follow_up_prompt is not None:
+            conversation += [
+                {"role": "assistant", "pass": "dialect", "contents": [first_text]},
+                {"role": "user", "contents": [follow_up_prompt]},
+            ]
+        conversation.append({"role": "assistant", "contents": [final_text]})
+        return TranscriptionResponse(transcript=final_text, conversation=conversation, time_to_first_token_ms=final_token_ms)
+
+    @staticmethod
+    async def _stream(
+        client: Any, deployment: str, messages: list[dict[str, Any]], options: dict[str, Any], started: float
+    ) -> tuple[str, float | None]:
+        stream = await client.chat.completions.create(model=deployment, messages=messages, stream=True, **options)
+        text = ""
+        first_token_ms = None
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                if first_token_ms is None:
+                    first_token_ms = (time.perf_counter() - started) * 1000
+                text += delta
+        text = text.strip()
+        if not text:
+            raise RuntimeError(f"Audio chat deployment {deployment} returned no text.")
+        return text, first_token_ms

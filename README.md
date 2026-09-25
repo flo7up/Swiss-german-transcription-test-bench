@@ -1,28 +1,63 @@
 # Swiss German Transcription Benchmark
 
-A local-first workbench for comparing how voice-capable models transcribe Swiss German dialects. Select ETH SwissDial utterances and model deployments, run a balanced evaluation matrix, inspect each transcript, and compare Word Match, WER, CER, streaming time to first token, and completion time.
+A local-first workbench for measuring how well voice-capable models understand Swiss German dialects. Pick ETH SwissDial recordings across eight dialects, choose a task (transcribe the dialect or translate to High German) and a prompting strategy, run the models, and inspect every transcript with word-level differences, WER, CER, chrF, streaming latency, and a speaker-weighted score.
 
-![Swiss German benchmark workspace](docs/images/app-overview.png)
+> **Dataset:** the recordings come from **SwissDial 1.1** by ETH Zurich, which you download separately:
+> **<https://mtc.ethz.ch/publications/open-source/swiss-dial.html>**
+> SwissDial is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). No audio or dataset text ships with this repository.
 
-The browser workspace keeps utterances and their dialect references at the center of the workflow.
+![Benchmark setup: choose task, strategy, dialects, utterances, and models](docs/images/app-overview.png)
 
-![Illustrative dialect comparison chart](docs/images/dialect-comparison.png)
+## Highlights
 
-> The chart image uses illustrative sample values to demonstrate the interface. It does not report measured model performance.
+Measured with OpenAI Realtime 2.1 on 160 SwissDial clips (20 per dialect); see [Measured effect](#measured-effect-september-2026) for details.
+
+| Task | Baseline prompt | Ensemble strategy |
+| --- | ---: | ---: |
+| Translate Swiss German → High German (word match) | 67.1% | **72.8%** |
+| Transcribe the dialect verbatim (word match) | 38.4% | **53.9%** |
+
+- **Ensemble strategy:** three independent Realtime passes per clip, reconciled by a text model (gpt-5.5). It improves every dialect in both tasks.
+- **Dialect importance:** built-in estimates of how many people speak each dialect (Swiss Federal Statistical Office data), used to weight results.
+- **Transparent scoring:** every output is shown next to the reference with extra and missing words highlighted, plus the individual hypotheses behind each ensemble answer.
+
+## Screenshots
+
+**200-utterance comparison.** Reopened from History, not rerun: 200 clips across eight dialects, evaluated by Realtime 2 and Realtime 2.1 (400 saved results):
+
+![Saved 200-utterance Realtime comparison with horizontal model and dialect bars](docs/images/results-200-comparison.png)
+
+**By dialect.** Grouped horizontal bars compare the models in each dialect, ordered by number of speakers:
+
+![Horizontal model bars grouped by dialect](docs/images/results-overview.png)
+
+**Inspection.** Word-level diff against the reference, with the three Realtime hypotheses the ensemble fused:
+
+![Result table with diff highlighting and ensemble hypotheses](docs/images/results-table.png)
+
+**Dialects.** Estimated speakers per SwissDial dialect region, with typical features and one-click benchmarking:
+
+![Dialect importance page](docs/images/dialects.png)
+
+**Dark mode.** Dialect transcription results:
+
+![Dark mode results](docs/images/dark-mode.png)
+
+<sub>Screenshots show sentences from SwissDial 1.1 (ETH Zurich, CC BY-NC 4.0) and results measured on the author's Azure deployments.</sub>
 
 The backend uses the Python [Microsoft Agent Framework](https://learn.microsoft.com/agent-framework/overview/agent-framework-overview) for Foundry-hosted audio models and a direct Azure OpenAI Realtime transport for the checked-in Realtime configurations. Audio, run history, cloud resources, and credentials are not included in the repository.
 
 ## What It Does
 
-- Reads editable Microsoft Foundry deployment definitions from `config/models.json`.
-- Imports a balanced 160-clip catalog from the official extracted ETH SwissDial 1.1 dataset into an ignored `data/swissdial` runtime directory. Legacy TSV ZIP exports remain supported.
+- Reads editable Microsoft Foundry deployment definitions from `config/models.json`, with an optional custom deployment configured in `.env`.
+- Imports a balanced 160-clip catalog from the extracted [ETH SwissDial 1.1 dataset](https://mtc.ethz.ch/publications/open-source/swiss-dial.html) into an ignored `data/swissdial` runtime directory. Legacy TSV ZIP exports remain supported. You can also upload your own manifest-and-audio ZIP from the Benchmark page.
 - Streams each imported test clip locally in the browser beside its Swiss German and High German reference text.
 - Offers two tasks: **Transcribe dialect** (score against the matching Swiss German transcript) and **Translate to High German** (score against the High German parallel text).
 - Offers four prompt strategies: **Baseline**, **Dialect-guided** (dialect features plus same-dialect example sentences), **Two-pass** (transcribe in dialect, then translate in the same session), and **Ensemble** (three independent Realtime passes reconciled by a text model such as gpt-5.5).
 - Shows a **Dialects** page with estimated speaker numbers per dialect region from official Swiss Federal Statistical Office data, and weights results by those shares.
 - Lets evaluators choose any model-by-clip matrix and deployment-specific parameters.
 - Runs a one-click Realtime 2 versus Realtime 2.1 comparison across every available dialect, using up to two utterances per dialect.
-- Sends audio using Microsoft Agent Framework `Content.from_data(...)` through `FoundryChatClient`, adding the known dialect to each clip's transcription instruction.
+- Sends audio using Microsoft Agent Framework `Content.from_data(...)` through `FoundryChatClient` (Entra) or `OpenAIChatClient` (API key) for Foundry Responses models, adding the known dialect to each clip's transcription instruction.
 - Scores model output with normalized word error rate (WER), character error rate (CER), and chrF, and highlights word-level differences against the reference.
 - Stores the complete local run history in `.runtime/benchmark.sqlite3`.
 - Provides FastAPI endpoints, a dependency-free browser UI, VS Code debugger profiles, and a Foundry Toolkit Agent Inspector task.
@@ -54,10 +89,10 @@ scripts/           SwissDial archive importer
 ## Prerequisites
 
 - Python 3.11 or newer.
-- A Microsoft Foundry project with one or more audio-capable model deployments.
-- An Azure identity accepted by the target Foundry project. The app uses `DefaultAzureCredential`; configure your preferred local development credential before starting model runs. See the [Azure Identity guidance](https://learn.microsoft.com/azure/developer/python/sdk/authentication-overview).
+- A Microsoft Foundry project (for Entra authentication) or Azure OpenAI resource (for API-key authentication) with the audio-capable deployments you want to test.
+- An Azure identity accepted by the target Foundry project, or a resource API key for direct model inference. By default the app uses `DefaultAzureCredential`; see the [Azure Identity guidance](https://learn.microsoft.com/azure/developer/python/sdk/authentication-overview).
 
-The test bench uses **RBAC authentication only**. It does not read or require `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, or a Foundry key. Locally, `DefaultAzureCredential` uses the signed-in Azure CLI identity; when hosted, it should use the workload's managed identity. Grant that principal the appropriate Foundry/Azure OpenAI data-plane role before running a benchmark.
+By default, the test bench uses Entra RBAC. Locally, `DefaultAzureCredential` can use the signed-in Azure CLI identity; when hosted, prefer a managed identity. Grant that principal the appropriate Foundry/Azure OpenAI data-plane role. See [Authentication and custom deployments](#authentication-and-custom-deployments) for the API-key alternative.
 
 The repository does not include ETH SwissDial media. Download [SwissDial 1.1 from ETH Zurich](https://mtc.ethz.ch/publications/open-source/swiss-dial.html). The dataset is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). Confirm that your use is noncommercial and complies with its attribution and other terms before importing, running, publishing results, or sharing derived transcripts.
 
@@ -75,17 +110,18 @@ The repository does not include ETH SwissDial media. Download [SwissDial 1.1 fro
 
   - Set `AZURE_OPENAI_ENDPOINT` for the checked-in Realtime models.
   - Set `FOUNDRY_PROJECT_ENDPOINT` for model entries that use the Microsoft Agent Framework adapter.
+  - Optionally configure `FOUNDRY_API_KEY` for key-based model inference or `BENCHMARK_CUSTOM_MODEL_NAME` for a custom Responses deployment; see [Authentication and custom deployments](#authentication-and-custom-deployments).
   - Optionally set `BENCHMARK_REFINER_DEPLOYMENT` to a text deployment on the same Azure OpenAI resource (for example `gpt-5.5`) to enable the **Ensemble** strategy. `BENCHMARK_REFINER_REASONING_EFFORT` defaults to `low`; set it to an empty value for non-reasoning deployments.
 
   Edit each `deployment` value in `config/models.json` so it exactly matches a deployment in your Azure resource. The checked-in registry contains Realtime 2 and Realtime 2.1 entries as configuration examples; it does not provision those deployments.
 
-3. Download and extract [SwissDial 1.1](https://mtc.ethz.ch/publications/open-source/swiss-dial.html), then import its directory. The default is a deterministic 160-clip catalog balanced across all eight dialects; the UI initially selects a 16-clip working sample from that catalog.
+3. To use SwissDial, download and extract [SwissDial 1.1](https://mtc.ethz.ch/publications/open-source/swiss-dial.html), then import its directory. The default is a deterministic 160-clip catalog balanced across all eight dialects; the UI initially selects a 16-clip working sample from that catalog. **For your own recordings instead, skip this step and [upload your dataset](#dataset-manifest) from the Benchmark page.**
 
    ```powershell
   ./.venv/Scripts/python.exe scripts/import_swissdial_archive.py "C:\path\to\data1.1"
    ```
 
-  Use `--catalog-size 320`, `--dialects be zh`, or `--seed 7` to change the local catalog. A catalog size of `0` imports every matching clip, which requires roughly 9.5 GB for SwissDial 1.1. The legacy `--sample-size` spelling remains an alias for `--catalog-size`. The importer writes only cataloged audio, `data/swissdial/manifest.jsonl`, and `data/swissdial/examples.jsonl`; all are ignored by Git. `examples.jsonl` holds text-only dialect/High German sentence pairs for prompting. It excludes every cataloged `sentence_id` (in all dialects, because SwissDial sentences are parallel) and any sentence whose High German text shares more than half of its content words with a cataloged sentence. To rebuild only the example pool for an existing catalog, for example from the text-only metadata download, run `import_swissdial_archive.py <dir-with-sentences_ch_de_numerics.json> --examples-only`. In the UI, choose all dialects or one dialect and select or resample up to the full imported catalog.
+  Use `--catalog-size 200` (25 clips per dialect), `--catalog-size 320`, `--dialects be zh`, or `--seed 7` to change the local catalog. A catalog size of `0` imports every matching clip, which requires roughly 9.5 GB for SwissDial 1.1. The legacy `--sample-size` spelling remains an alias for `--catalog-size`. The importer writes only cataloged audio, `data/swissdial/manifest.jsonl`, and `data/swissdial/examples.jsonl`; all are ignored by Git. `examples.jsonl` holds text-only dialect/High German sentence pairs for prompting. It excludes every cataloged `sentence_id` (in all dialects, because SwissDial sentences are parallel) and any sentence whose High German text shares more than half of its content words with a cataloged sentence. To rebuild only the example pool for an existing catalog, for example from the text-only metadata download, run `import_swissdial_archive.py <dir-with-sentences_ch_de_numerics.json> --examples-only`. In the UI, choose all dialects or one dialect, pick a quick sample size such as **All 200**, or type any size up to the full imported catalog. The catalog size is the maximum available to select, not the number of paid model requests; the run bar shows the selected model-by-clip test count.
 
 4. Start the API in one terminal.
 
@@ -99,11 +135,45 @@ The repository does not include ETH SwissDial media. Download [SwissDial 1.1 fro
 
 `config/models.json` is the intentionally small model registry. Each object has a stable UI ID, a human label, the literal Foundry deployment name, capability tags, and the parameter fields that this deployment accepts.
 
+### Authentication and custom deployments
+
+After copying `.env.example` to `.env`, choose **one** authentication method:
+
+| Method | `.env` values | Model inference route |
+| --- | --- | --- |
+| Entra (default) | `FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>` for Foundry Responses models; `AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/openai/v1` for the direct transports | `DefaultAzureCredential` and the Foundry project endpoint for Responses; Entra tokens for Realtime, audio chat, transcription, and the refiner |
+| Resource API key | `AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/openai/v1` and `FOUNDRY_API_KEY=<key for that same resource>` | Direct OpenAI endpoint for Responses, Realtime, audio chat, transcription, and the refiner; no Entra login for model inference |
+
+`FOUNDRY_API_KEY` is optional: leave it empty or unset to retain Entra authentication. When it is set, the runner uses the key for **all** model inference transports and the optional text refiner; the Foundry project endpoint is **not** used for key-authenticated Responses calls. The API key does not authenticate Foundry project-management operations or Voice Live. Keep the key only in the Git-ignored `.env` file or a secret manager, never in `config/models.json` or an API request. This app does not automatically read `AZURE_OPENAI_API_KEY` or `OPENAI_API_KEY`.
+
+To add a custom audio-capable **Responses** deployment without changing the registry, set `BENCHMARK_CUSTOM_MODEL_NAME=your-deployment-name` in `.env` and restart the API. The model picker then includes it under the ID `custom-foundry-model`, with that exact name used for inference. This setting works with either authentication method above. Leave it blank to remove the extra entry. Do not also use `custom-foundry-model` as an ID in `config/models.json`; the registry loader rejects that collision.
+
+If your deployment instead needs Realtime, Chat Completions, or Audio Transcriptions, add or edit a registry entry with the appropriate `transport`. For example, a custom name for a Realtime deployment:
+
+```json
+{
+  "id": "my-realtime",
+  "label": "My Realtime deployment",
+  "deployment": "my-realtime-deployment-name",
+  "description": "Audio transcription over the Realtime WebSocket API.",
+  "capabilities": ["audio", "transcription", "realtime"],
+  "transport": "azure-openai-realtime",
+  "parameters": []
+}
+```
+
+The `deployment` value must match the deployment name on your resource, not necessarily the underlying model family. A custom name does not create or deploy a model.
+
+### Registry entries
+
+For a Foundry Responses deployment, omit `transport` (it defaults to `foundry-responses`):
+
 ```json
 {
   "id": "foundry-audio-preview",
   "label": "Audio preview deployment",
   "deployment": "your-foundry-deployment-name",
+  "description": "Audio-capable Responses deployment.",
   "capabilities": ["audio", "transcription"],
   "parameters": [
     { "name": "temperature", "label": "Temperature", "kind": "number", "default": 0 }
@@ -113,19 +183,44 @@ The repository does not include ETH SwissDial media. Download [SwissDial 1.1 fro
 
 The API rejects parameter names that are not listed for the selected model. Use a deterministic setting such as `temperature: 0` when comparing transcription quality.
 
+### Supported model types
+
+The `transport` field selects the adapter. The checked-in registry lists every audio-to-text model that can be deployed as an Azure OpenAI deployment in Microsoft Foundry (checked in Sweden Central, September 2026). Create the deployments you want to test and keep `deployment` equal to your deployment name; models you haven't deployed simply fail if selected.
+
+| Transport | Models in the registry | API | Notes |
+| --- | --- | --- | --- |
+| `azure-openai-realtime` | gpt-realtime-2, gpt-realtime-2.1, gpt-realtime-2.1-mini, gpt-realtime-1.5 | Realtime WebSocket (`/openai/v1/realtime`) | Audio is decoded to 24 kHz PCM; text-only responses; supports all strategies |
+| `azure-openai-audio-chat` | gpt-audio-1.5, gpt-audio-mini | Chat Completions with `input_audio` | Turn-based; follows instructions; two-pass uses a follow-up message; first-token time from streaming |
+| `azure-openai-transcription` | gpt-transcribe, gpt-4o-transcribe, gpt-4o-mini-transcribe, whisper | `/openai/deployments/{deployment}/audio/transcriptions` | The prompt is sent as *context* (dialect name, features, example sentences), not as instructions; no two-pass; whisper uses only the last 224 prompt tokens |
+| *(none)* / `foundry-responses` | Audio-capable Responses deployment (including `BENCHMARK_CUSTOM_MODEL_NAME`) | Microsoft Agent Framework Responses client | Entra: `FoundryChatClient` with `FOUNDRY_PROJECT_ENDPOINT`; API key: `OpenAIChatClient` with `AZURE_OPENAI_ENDPOINT` |
+
+Transcription requests use the deployment-scoped route with API version `2025-04-01-preview` (override with `BENCHMARK_TRANSCRIPTION_API_VERSION`), because the `/openai/v1/audio/transcriptions` route is not available on every resource. Not included: gpt-4o-transcribe-diarize (speaker labels add nothing for single-speaker clips), gpt-realtime-translate (cross-language live translation), gpt-realtime-whisper and gpt-live-transcribe (streaming captions with a different session protocol), and text-to-speech, Voice Live, Azure Speech, and mai-transcribe, which are not audio-to-text model deployments.
+
 ### Saved instructions
 
 The prompt editor can save a named instruction preset in the local SQLite database. Enter a name, choose **Save instruction**, then select that preset later to restore its text. Saving the same name updates the preset. Each benchmark still stores the exact instruction text that was active when the run started.
 
 ## Voice Catalog
 
-`config/voice-options.json` is an informational inventory of realtime and managed voice options. Only deployments in `config/models.json` appear in the runnable model picker.
+`config/voice-options.json` is an informational inventory of realtime and managed voice options. Deployments in `config/models.json` and the optional `BENCHMARK_CUSTOM_MODEL_NAME` appear in the runnable model picker.
 
-Entries with `"transport": "azure-openai-realtime"` decode source audio to 24 kHz PCM and use the Azure OpenAI Realtime WebSocket API with `DefaultAzureCredential`. Entries without that transport use the Microsoft Agent Framework `FoundryChatClient` adapter. Voice Live remains catalog metadata until a compatible stored-audio adapter is added.
+See [Supported model types](#supported-model-types) for how each transport is called. Voice Live remains catalog metadata until a compatible stored-audio adapter is added.
 
 ## Dataset Manifest
 
-The importer generates JSON Lines records like this:
+To bring your own recordings, open **Benchmark → Utterances → Upload your own audio dataset**. Select a ZIP and give it a unique source name. Uploads are **additive**: existing SwissDial clips and previous uploaded sources remain selectable under the **Data source** filter. They are stored locally in `.runtime/datasets/<generated-id>/` by default, not sent to a model until you start a run. `BENCHMARK_DATASETS_DIR` can move the uploaded datasets directory (restart the API to use a new location); keep that directory if you want to reopen old results with their audio. Importing the same item ID twice is rejected rather than overwriting an existing recording.
+
+The ZIP must have `manifest.jsonl` **at its root** and audio under `clips/` (paths and names are case-sensitive within the archive):
+
+```text
+my-recordings.zip
+├── manifest.jsonl
+└── clips/
+    ├── clip-01.wav
+    └── clip-02.mp3
+```
+
+`manifest.jsonl` is **UTF-8 JSON Lines**, not a single JSON array: one JSON object per non-empty line. For example, the importer generates records like this (put each record on its own line):
 
 ```json
 {
@@ -140,7 +235,13 @@ The importer generates JSON Lines records like this:
 }
 ```
 
-`audio_path` is relative to the manifest. The official importer selects `ch_<dialect>` as the scoring reference and retains `de` only as metadata. You may supply a different manifest through `BENCHMARK_MANIFEST_PATH` as long as it uses the same minimal fields.
+Required per record: `id` (unique across all installed sources; 1–120 ASCII letters, digits, `.`, `_`, or `-`) and `audio_path` (relative to the manifest, under `clips/`, pointing to an audio file in the ZIP). Supported upload extensions are `.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`, `.opus`, and `.webm`; model adapters may support fewer formats (the Foundry Responses adapter handles WAV and MP3). `reference_transcript` is optional but needed to calculate word/character scores. `standard_german_transcript` is optional, but required if you want to select a clip for the **Translate to High German** task. Optional `dialect` and `dialect_name` improve dialect-specific prompts and filters; `source`, `topic`, `sentence_id`, and other fields remain available as metadata. Choose a suitable base prompt for your recordings, especially if their language differs from Swiss German.
+
+The ZIP may only contain the manifest and audio it references; no unreferenced files, encrypted entries, symlinks, absolute paths, or `..` path segments. Uploads are limited to **512 MiB compressed**, **2 GiB extracted**, **5,000 archive entries**, and an **8 MiB manifest**. Invalid uploads are rejected without publishing a partial dataset. To upload another source, give its clips distinct IDs (for example `projectA-clip-01`).
+
+Alternatively, keep an unpacked dataset on disk and set `BENCHMARK_MANIFEST_PATH` in `.env` to its `manifest.jsonl`. It becomes the base catalog instead of the default SwissDial manifest; uploaded ZIP datasets remain available alongside it. This setting requires an API restart. The official importer selects `ch_<dialect>` as the scoring reference and retains `de` only as metadata.
+
+For an uploaded source, guided prompts only use example pairs from clips in that same source when available, never SwissDial pairs. A custom base manifest also skips the built-in SwissDial example pool by default; set `BENCHMARK_EXAMPLES_PATH` to a compatible JSONL pool if you want to provide your own.
 
 ## Metrics and Results
 
@@ -152,15 +253,17 @@ The UI also exposes **Word Match**, calculated as $\max(0, 1 - \text{WER})$. It 
 
 **chrF** is the character n-gram F-score (orders 1–6, $\beta = 2$) over normalized text with spaces removed. It gives partial credit for inflection and spelling variants ("spezielle" vs. "besondere" still shares characters with its context), so it is a better fit for translations than WER. It is computed on the fly from stored transcripts, so it is also available for older runs.
 
-On the **Results** tab, each model gets a scorecard with mean match, a **speaker-weighted** match (per-dialect means weighted by each dialect region's share of Swiss German speakers; see below), chrF, and completion time. In the results table, words in the model output that are not in the reference are highlighted, and reference words the model missed are shown struck through. Filter the table by dialect or model, and sort by lowest or highest match to find failure patterns quickly. Two-pass runs also show the intermediate dialect transcript.
+On the **Results** tab, models are compared with horizontal bars on the same 0–100% mean word match scale. Each model also shows its result count, a **speaker-weighted** match (per-dialect means weighted by each dialect region's share of Swiss German speakers; see below), chrF, and completion time. In the results table, words in the model output that are not in the reference are highlighted, and reference words the model missed are shown struck through. Filter the table by dialect or model, and sort by lowest or highest match to find failure patterns quickly. Two-pass runs also show the intermediate dialect transcript.
 
-Use **Compare all dialects** in the model panel to select both Realtime deployments and queue a balanced 32-test run over the default 16-utterance corpus with the current task and strategy. While results arrive, the Results tab groups the active selected metric by dialect in a vertical bar chart ordered by number of speakers. When several numeric result fields are selected, switch the chart among Match, chrF, WER, CER, First token, and Completion. Hover or focus a bar for the exact model, dialect, value, and scored utterance count.
+Use **Compare all dialects** in the model panel to select both Realtime deployments and queue a balanced 32-test run over the default 16-utterance corpus with the current task and strategy. While results arrive, the Results tab groups horizontal model bars by dialect, ordered by number of speakers. All bars in a chart share the same scale; missing scores are shown as pending rather than zero. When several numeric result fields are selected, switch the chart among Match, chrF, WER, CER, First token, and Completion. Hover or focus a bar for the exact model, dialect, value, and scored utterance count.
 
 **First token** measures the time from sending the Realtime `response.create` event until the first non-empty streamed text delta of the final answer arrives (for two-pass runs this includes the dialect pass). It excludes local decoding, authentication, connection/session setup, and audio upload. **Completion** remains the full end-to-end duration from starting local processing through the complete transcript; it includes any rate-limit retry delay. First-token values are unavailable for adapters that return only a completed response and for runs created before this metric was added.
 
 The same chart is shown for ordinary runs with a single selected model, including runs limited to one dialect.
 
 The **History** tab aggregates all persisted runs into total runs, successful results versus all results, mean Match, and mean completion time. Each run row shows its models, task, strategy, status-quality indicator, mean match, and task completion ratio. Indicators prioritize active/stopped/error states, then classify completed scored runs as **Strong match** ($\geq 85\%$), **Review** ($60\%-85\%$), or **Low match** ($< 60\%$).
+
+Benchmark runs and per-clip results are saved locally in `.runtime/benchmark.sqlite3` by default (or the file set by `BENCHMARK_DATABASE_PATH`). To capture a screenshot later, start the API, open **History**, select a completed run, and view its **Results**; you do not need to rerun or repay for its model requests. The saved run includes model outputs, references, scores, timings, and conversation details, and can be downloaded as CSV. Keep the database if you want to retain those results across restarts.
 
 Open a historical run to use **Download CSV** for its full settings and result matrix, or **Use this setup** to restore its available models, clips, task, strategy, parameters, and prompt into the Benchmark tab for a follow-up run.
 
@@ -171,15 +274,15 @@ Every selected model and clip produces an independent result. A failed request i
 | Strategy | What the model receives | Tasks |
 | --- | --- | --- |
 | **Baseline** | The base prompt plus the dialect name. This is the original behavior, so results stay comparable with older runs. | Both |
-| **Dialect-guided** | The base prompt, the dialect's local name, characteristic features from `config/dialects.json`, four example sentences in the same dialect from the imported catalog, and (for High German) Swiss Standard German output rules such as always using `ss` and mapping narrative perfect tense to the preterite. | Both |
+| **Dialect-guided** | The base prompt, the dialect's local name, characteristic features from `config/dialects.json`, four same-dialect example sentences from the leakage-filtered `examples.jsonl` pool, and (for High German) Swiss Standard German output rules such as always using `ss` and mapping narrative perfect tense to the preterite. | Both |
 | **Two-pass** | First a dialect-guided verbatim transcription, then, in the same Realtime session (or as a follow-up Agent Framework turn), an instruction to translate that transcript into Swiss Standard German using the audio to resolve unclear words. | High German only |
 | **Ensemble** | Three independent Realtime passes over the same clip (dialect-guided Swiss German, dialect-guided High German, and the baseline prompt), then one call to a text deployment that reconciles the hypotheses. For dialect output, the fusion prompt also includes eight retrieved same-dialect sentences from `examples.jsonl` so the result follows SwissDial spelling conventions. Needs `BENCHMARK_REFINER_DEPLOYMENT`. | Both |
 
-Few-shot examples are chosen deterministically per clip and **never include the evaluated sentence**: the sentence itself and any clip with the same SwissDial `sentence_id` are excluded. Dialect feature lists use generic dialect vocabulary rather than catalog sentences, so they don't leak test content. The ensemble's retrieved spelling examples come from `examples.jsonl`, which is filtered the same way. The API default remains `baseline`; the UI defaults to **Dialect-guided**, which costs one Realtime call per clip, and marks **Ensemble** as the most accurate option when a fusion model is configured.
+Few-shot examples are chosen deterministically per clip from the text-only `examples.jsonl` pool, which excludes **all evaluated sentence IDs** and near-duplicate High German sentences. If a pool has not been imported, official-dataset runs receive no few-shot examples rather than using references from evaluated clips. Dialect feature lists use generic dialect vocabulary rather than catalog sentences. For custom datasets configured without an example-pool path, examples can still come from other catalog items; use a separate training pool for a strict held-out evaluation. The API default remains `baseline`; the UI defaults to **Dialect-guided**, which costs one Realtime call per clip, and marks **Ensemble** as the most accurate option when a fusion model is configured.
 
 ### Measured effect (September 2026)
 
-All runs used OpenAI Realtime 2.1 on the full 160-clip catalog (20 clips per dialect). Each table compares only clips that every listed run completed. "Speaker-weighted" weights each dialect's mean by its share of Swiss German speakers (see [Dialect Importance](#dialect-importance)).
+These historical runs used OpenAI Realtime 2.1 on the full 160-clip catalog (20 clips per dialect). They predate the held-out example-pool change: guided prompts could contain reference text from *other* evaluated clips, so treat scores as exploratory and do not compare them directly with later held-out runs. Each table compares only clips that every listed run completed. "Speaker-weighted" weights each dialect's mean by its share of Swiss German speakers (see [Dialect Importance](#dialect-importance)).
 
 **Translate to High German** (149 paired clips; fusion model gpt-5.5 with low reasoning effort):
 
@@ -202,6 +305,49 @@ All runs used OpenAI Realtime 2.1 on the full 160-clip catalog (20 clips per dia
 - **Recognition is the bottleneck.** Having gpt-5.5 translate a Realtime dialect transcript, with or without retrieved example translations, did not beat the Realtime model's own translation (69.4% vs. 70.6%). Misheard words cannot be recovered downstream; combining independent hearings can outvote some of them. Fusing five or seven hearings instead of three added only about 1 point.
 - **Where to expect errors.** Valais and Aargau remain hardest. Most of their remaining errors are misheard words, not translation mistakes. Bernese and Basel German are the most reliable.
 - **Cost and speed.** The ensemble makes three Realtime calls and one text call per clip. On a capacity-1 Realtime deployment its median completion was 9 seconds per clip for High German and 20 seconds for dialect output, where the fusion prompt is longer and the run overlapped other experiments. Guided took about 3 seconds. Realtime outputs are not deterministic: the same prompt on the same clips can move a clip's score by about 15 points between runs, so compare strategies on at least 100 clips. In a smaller 45-clip run, **Two-pass** scored between baseline and guided while raising median completion time by about 65%.
+
+### Model leaderboard (September 2026)
+
+All audio-to-text models deployable in Microsoft Foundry, each run with the **Dialect-guided** strategy on the full 160-clip catalog (Whisper: 40-clip subset, 5 per dialect, because its Standard deployment allows few requests per minute). These exploratory runs also predate the held-out example-pool fix described above. Scores are word match on the clips that every full-catalog run completed (142 for High German, 145 for dialect); per-dialect columns in %.
+
+**Translate to High German**
+
+| Model | Type | Word match | chrF | Speaker-weighted | AG | BE | BS | GR | LU | SG | VS | ZH |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+<!-- multi-model-hg -->
+| Ensemble (Realtime 2.1 ×3 + gpt-5.5) | Same-model ensemble | 72.6% | 80.4% | 73.9% | 67 | 79 | 82 | 78 | 71 | 72 | 59 | 75 |
+| **GPT-4o Transcribe** | Speech-to-text | **71.9%** | **79.9%** | **73.3%** | 70 | 75 | 68 | 75 | 64 | 80 | 66 | 77 |
+| Realtime 2.1 | Realtime | 70.0% | 78.7% | 72.8% | 51 | 81 | 78 | 78 | 67 | 76 | 55 | 78 |
+| Realtime 2 | Realtime | 67.5% | 76.9% | 70.2% | 54 | 82 | 79 | 72 | 70 | 74 | 46 | 67 |
+| Audio 1.5 | Audio chat | 65.4% | 76.4% | 65.8% | 61 | 71 | 69 | 68 | 55 | 71 | 63 | 67 |
+| Whisper *(40 clips)* | Speech-to-text | 64.6% | 75.0% | 68.0% | 58 | 77 | 72 | 58 | 64 | 70 | 49 | 69 |
+| Audio mini | Audio chat | 63.3% | 73.4% | 67.0% | 52 | 72 | 63 | 71 | 58 | 74 | 43 | 74 |
+| GPT-4o mini Transcribe | Speech-to-text | 62.5% | 73.1% | 67.3% | 63 | 71 | 54 | 61 | 61 | 69 | 45 | 76 |
+| Realtime 1.5 | Realtime | 59.5% | 70.2% | 62.2% | 47 | 71 | 70 | 70 | 55 | 73 | 33 | 60 |
+| Realtime 2.1 mini | Realtime | 54.6% | 68.1% | 59.1% | 43 | 68 | 61 | 58 | 53 | 53 | 36 | 70 |
+| GPT Transcribe | Speech-to-text | 52.3% | 67.2% | 54.4% | 52 | 56 | 56 | 52 | 50 | 55 | 40 | 57 |
+
+**Transcribe dialect**
+
+| Model | Type | Word match | chrF | Speaker-weighted | AG | BE | BS | GR | LU | SG | VS | ZH |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+<!-- multi-model-dialect -->
+| Ensemble (Realtime 2.1 ×3 + gpt-5.5) | Same-model ensemble | 53.1% | 70.1% | 55.8% | 38 | 44 | 66 | 54 | 55 | 67 | 35 | 65 |
+| **GPT Transcribe** | Speech-to-text | **46.0%** | **67.7%** | **48.4%** | 31 | 37 | 62 | 49 | 34 | 63 | 32 | 61 |
+| GPT-4o Transcribe | Speech-to-text | 44.6% | 66.8% | 47.4% | 26 | 39 | 62 | 49 | 36 | 57 | 27 | 61 |
+| Realtime 2 | Realtime | 42.7% | 63.6% | 45.3% | 34 | 42 | 56 | 45 | 38 | 58 | 20 | 48 |
+| Realtime 2.1 | Realtime | 42.4% | 63.5% | 44.9% | 27 | 40 | 57 | 45 | 40 | 52 | 25 | 53 |
+| Audio 1.5 | Audio chat | 41.5% | 64.7% | 43.6% | 30 | 39 | 54 | 43 | 39 | 50 | 26 | 50 |
+| GPT-4o mini Transcribe | Speech-to-text | 38.1% | 61.8% | 40.3% | 24 | 34 | 55 | 41 | 27 | 52 | 22 | 49 |
+| Realtime 1.5 | Realtime | 36.9% | 60.6% | 38.1% | 21 | 39 | 51 | 48 | 28 | 46 | 18 | 42 |
+| Whisper *(39 clips)* | Speech-to-text | 36.7% | 62.6% | 38.4% | 24 | 34 | 59 | 34 | 26 | 35 | 26 | 52 |
+| Audio mini | Audio chat | 30.3% | 52.6% | 32.1% | 14 | 26 | 45 | 37 | 25 | 48 | 11 | 36 |
+| Realtime 2.1 mini | Realtime | 27.2% | 52.8% | 28.2% | 18 | 20 | 41 | 32 | 24 | 40 | 12 | 31 |
+
+- **Speech-to-text models are the strongest single models.** GPT-4o Transcribe leads the High German task and GPT Transcribe leads dialect transcription. GPT-4o Transcribe is also priced far below Realtime audio input (about $6 vs. $32 per million audio input tokens, roughly $0.36 per audio hour, per the [Foundry speech model guide](https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/choose-the-right-speech-and-voice-model/4533856)); check current pricing for your region.
+- **GPT Transcribe keeps dialect when given dialect context** (the guided prompt's example sentences), so it is excellent at verbatim dialect but weak when High German is the target. Whisper normalizes nearly everything to High German.
+- **Mini models trail clearly** (Realtime 2.1 mini, Audio mini, GPT-4o mini Transcribe), and Realtime 1.5 is well behind the Realtime 2 family.
+- Scores are single runs; per-clip results can vary by about 15 points between runs, so differences of 1–2 points between neighbours are not meaningful.
 
 ## Dialect Importance
 
@@ -257,7 +403,7 @@ Use `Run Benchmark API` or `Debug Swiss German Benchmark API` from VS Code for n
 ## Security and Data Handling
 
 - Keep `.env`, ETH media, generated manifests, and `.runtime/` out of source control.
-- Use Microsoft Entra RBAC for model access. API keys are intentionally not supported by the runner.
+- Prefer Microsoft Entra RBAC for model access. If using `FOUNDRY_API_KEY`, keep the secret in the ignored `.env` file or a secret manager and rotate it according to your organization's policy.
 - Review the data path and retention policy of the Foundry deployment before uploading voice data.
 - Do not enable sensitive tracing for production or restricted audio without an approved telemetry policy.
 - Run benchmarks only against model deployments and projects you are authorized to use.

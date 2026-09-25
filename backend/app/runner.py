@@ -8,14 +8,14 @@ from dataclasses import dataclass, field
 import hashlib
 from typing import Any, Iterable
 
-from .catalog import load_dataset_items, load_dialect_atlas, load_models
+from .catalog import load_all_dataset_items, load_dialect_atlas, load_models
 from .domain import DatasetItem, ModelDefinition
 from .examples import ExamplePool
 from .metrics import score_transcript
 from .refiner import TextRefiner
 from .repository import RunRepository
 from .settings import BenchmarkSettings
-from .transcriber import AudioTranscriber, TranscriptionResponse
+from .transcriber import TRANSCRIPTION_TRANSPORT, AudioTranscriber, TranscriptionResponse
 
 
 DEFAULT_TRANSCRIPTION_PROMPT = (
@@ -27,6 +27,7 @@ HIGH_GERMAN_TRANSCRIPTION_PROMPT = (
 RUN_CONTROL_POLL_SECONDS = 0.1
 REFERENCE_MODES = {"dialect", "standard-german"}
 STRATEGIES = {"baseline", "guided", "two-pass", "ensemble"}
+ENSEMBLE_TRANSPORT = "ensemble"
 FEW_SHOT_EXAMPLE_COUNT = 4
 ENSEMBLE_SPELLING_EXAMPLES = 8
 FUSION_INSTRUCTIONS = (
@@ -81,8 +82,12 @@ class BenchmarkRunner:
         reference_mode: str,
         catalog: Iterable[DatasetItem],
         dialect_profiles: dict[str, dict[str, Any]],
+        example_pool: ExamplePool | None = None,
     ) -> TranscriptionResponse:
-        item_prompt = self._item_prompt(strategy, prompt, item, reference_mode, catalog, dialect_profiles)
+        item_prompt = self._item_prompt(
+            strategy, prompt, item, reference_mode, catalog, dialect_profiles,
+            self._prompt_examples(item, catalog, example_pool),
+        )
         if item_prompt.follow_up_prompt is None:
             return await self.transcriber.transcribe(model, item, parameters, item_prompt.prompt)
         return await self.transcriber.transcribe(
@@ -101,24 +106,71 @@ class BenchmarkRunner:
         example_pool: ExamplePool | None,
     ) -> TranscriptionResponse:
         """Hear the clip three times independently, then let a text model reconcile the hypotheses."""
-        if self.refiner is None:
-            raise RuntimeError("The ensemble strategy requires BENCHMARK_REFINER_DEPLOYMENT.")
         catalog = list(catalog)
         target_prompt = prompt if reference_mode == "standard-german" else DEFAULT_TRANSCRIPTION_PROMPT
-        passes = {
-            "guided-dialect": self._item_prompt("guided", DEFAULT_TRANSCRIPTION_PROMPT, item, "dialect", catalog, dialect_profiles).prompt,
-            "guided-standard": self._item_prompt("guided", HIGH_GERMAN_TRANSCRIPTION_PROMPT, item, "standard-german", catalog, dialect_profiles).prompt,
-            "baseline": self._prompt_for_item(
-                prompt if prompt.strip() else target_prompt, item.metadata, reference_mode
-            ),
-        }
+        passes = [
+            ("guided-dialect", model, parameters, self._guided_pass_prompt(item, "dialect", catalog, dialect_profiles, example_pool)),
+            ("guided-standard", model, parameters, self._guided_pass_prompt(item, "standard-german", catalog, dialect_profiles, example_pool)),
+            ("baseline", model, parameters, self._prompt_for_item(prompt if prompt.strip() else target_prompt, item.metadata, reference_mode)),
+        ]
+        return await self._hear_and_fuse(item, passes, reference_mode, catalog, dialect_profiles, example_pool)
+
+    async def _multi_model_response(
+        self,
+        ensemble: ModelDefinition,
+        models: dict[str, ModelDefinition],
+        parameters_by_model: dict[str, dict[str, Any]],
+        item: DatasetItem,
+        reference_mode: str,
+        catalog: Iterable[DatasetItem],
+        dialect_profiles: dict[str, dict[str, Any]],
+        example_pool: ExamplePool | None,
+    ) -> TranscriptionResponse:
+        """Hear the clip once with each member model (different acoustic models err differently), then fuse."""
+        catalog = list(catalog)
+        passes = []
+        for index, member in enumerate(ensemble.members, start=1):
+            pass_mode = reference_mode if member["pass"] == "target" else member["pass"]
+            kind = "guided-dialect" if pass_mode == "dialect" else "guided-standard"
+            member_model = models[member["model"]]
+            passes.append(
+                (
+                    f"{kind}#{index}",
+                    member_model,
+                    parameters_by_model.get(member_model.id, {}),
+                    self._guided_pass_prompt(item, pass_mode, catalog, dialect_profiles, example_pool),
+                )
+            )
+        return await self._hear_and_fuse(item, passes, reference_mode, catalog, dialect_profiles, example_pool)
+
+    def _guided_pass_prompt(
+        self, item: DatasetItem, pass_mode: str, catalog: list[DatasetItem],
+        dialect_profiles: dict[str, dict[str, Any]], example_pool: ExamplePool | None,
+    ) -> str:
+        base = DEFAULT_TRANSCRIPTION_PROMPT if pass_mode == "dialect" else HIGH_GERMAN_TRANSCRIPTION_PROMPT
+        return self._item_prompt(
+            "guided", base, item, pass_mode, catalog, dialect_profiles,
+            self._prompt_examples(item, catalog, example_pool),
+        ).prompt
+
+    async def _hear_and_fuse(
+        self,
+        item: DatasetItem,
+        passes: list[tuple[str, ModelDefinition, dict[str, Any], str]],
+        reference_mode: str,
+        catalog: list[DatasetItem],
+        dialect_profiles: dict[str, dict[str, Any]],
+        example_pool: ExamplePool | None,
+    ) -> TranscriptionResponse:
+        if self.refiner is None:
+            raise RuntimeError("The ensemble strategy requires BENCHMARK_REFINER_DEPLOYMENT.")
         outcomes = await asyncio.gather(
-            *(self.transcriber.transcribe(model, item, parameters, pass_prompt) for pass_prompt in passes.values()),
+            *(self.transcriber.transcribe(model, item, parameters, pass_prompt) for _, model, parameters, pass_prompt in passes),
             return_exceptions=True,
         )
         hypotheses = {
             name: outcome.transcript
-            for name, outcome in zip(passes, outcomes)
+            for (name, _, _, _), outcome in zip(passes, outcomes)
             if not isinstance(outcome, BaseException) and outcome.transcript.strip()
         }
         if not hypotheses:
@@ -128,20 +180,24 @@ class BenchmarkRunner:
         profile = dialect_profiles.get(dialect_code, {})
         examples: list[tuple[str, str]] = []
         if reference_mode == "dialect":
-            query = hypotheses.get("guided-dialect") or hypotheses.get("baseline") or ""
-            if example_pool is not None and dialect_code in example_pool:
+            query = next(
+                (text for name, text in hypotheses.items() if name.split("#")[0] == "guided-dialect"),
+                next(iter(hypotheses.values())),
+            )
+            if example_pool is not None and not item.metadata.get("dataset") and dialect_code in example_pool:
                 examples = example_pool.similar(
                     dialect_code, query, ENSEMBLE_SPELLING_EXAMPLES, item.metadata.get("sentence_id")
                 )
-            else:
+            elif item.metadata.get("dataset") or self.settings.examples_path is None:
                 examples = self._few_shot_examples(item, catalog, ENSEMBLE_SPELLING_EXAMPLES)
         fusion_prompt = self._fusion_prompt(item, profile, reference_mode, hypotheses, examples)
         final = await self.refiner.complete(FUSION_INSTRUCTIONS, fusion_prompt)
 
+        labels = {name: model.label for name, model, _, _ in passes}
         conversation: list[dict[str, Any]] = [
-            {"role": "assistant", "pass": name, "contents": [text]} for name, text in hypotheses.items()
+            {"role": "assistant", "pass": name, "model": labels[name], "contents": [text]} for name, text in hypotheses.items()
         ]
-        failed = [name for name, outcome in zip(passes, outcomes) if isinstance(outcome, BaseException)]
+        failed = [name for (name, _, _, _), outcome in zip(passes, outcomes) if isinstance(outcome, BaseException)]
         if failed:
             conversation.append({"role": "system", "pass": "failed", "contents": failed})
         conversation.append(
@@ -194,8 +250,8 @@ class BenchmarkRunner:
         return "\n".join(lines)
 
     def create_run(self, request: BenchmarkRequest) -> str:
-        models = {model.id: model for model in load_models(self.settings.model_registry_path)}
-        items = {item.id: item for item in load_dataset_items(self.settings.manifest_path)}
+        models = {model.id: model for model in load_models(self.settings.model_registry_path, self.settings.custom_model_name)}
+        items = {item.id: item for item in load_all_dataset_items(self.settings.manifest_path, self.settings.uploaded_datasets_path)}
         missing_models = sorted(set(request.model_ids) - models.keys())
         missing_items = sorted(set(request.item_ids) - items.keys())
         if missing_models:
@@ -210,8 +266,31 @@ class BenchmarkRunner:
             raise ValueError(f"Unsupported strategy: {request.strategy}")
         if request.strategy == "two-pass" and request.reference_mode != "standard-german":
             raise ValueError("The two-pass strategy requires the High German evaluation reference.")
+        if request.strategy == "two-pass":
+            single_turn = sorted(
+                models[model_id].label
+                for model_id in request.model_ids
+                if models[model_id].transport == TRANSCRIPTION_TRANSPORT
+            )
+            if single_turn:
+                raise ValueError(
+                    f"The two-pass strategy needs a conversational model; not supported by: {', '.join(single_turn)}"
+                )
         if request.strategy == "ensemble" and self.refiner is None:
             raise ValueError("The ensemble strategy requires BENCHMARK_REFINER_DEPLOYMENT to name a text deployment.")
+        for model_id in request.model_ids:
+            model = models[model_id]
+            if model.transport != ENSEMBLE_TRANSPORT:
+                continue
+            if request.strategy != "ensemble":
+                raise ValueError(f"{model.label} is a multi-model ensemble; select the Ensemble strategy to run it.")
+            invalid = [
+                member["model"]
+                for member in model.members
+                if member["model"] not in models or models[member["model"]].transport == ENSEMBLE_TRANSPORT
+            ]
+            if invalid or not model.members:
+                raise ValueError(f"{model.label} has missing or nested member models: {', '.join(invalid) or 'none listed'}")
         if request.reference_mode == "standard-german":
             missing_references = sorted(
                 item_id
@@ -246,19 +325,15 @@ class BenchmarkRunner:
         if run["status"] in {"completed", "failed", "stopped"}:
             return
 
-        models = {model.id: model for model in load_models(self.settings.model_registry_path)}
-        items = {item.id: item for item in load_dataset_items(self.settings.manifest_path)}
+        models = {model.id: model for model in load_models(self.settings.model_registry_path, self.settings.custom_model_name)}
+        items = {item.id: item for item in load_all_dataset_items(self.settings.manifest_path, self.settings.uploaded_datasets_path)}
         strategy = run.get("strategy") or "baseline"
         dialect_profiles = (
             {profile["code"]: profile for profile in load_dialect_atlas(self.settings.dialects_path)["dialects"]}
             if strategy != "baseline"
             else {}
         )
-        example_pool = (
-            ExamplePool.load(self.settings.examples_path)
-            if strategy == "ensemble" and self.settings.examples_path is not None
-            else None
-        )
+        example_pool = ExamplePool.load(self.settings.examples_path) if self.settings.examples_path is not None else None
         if run["status"] == "queued":
             self.repository.set_run_status(run_id, "running")
         try:
@@ -272,7 +347,24 @@ class BenchmarkRunner:
                     reference_transcript = self._reference_for_item(item, run["reference_mode"])
                     started = time.perf_counter()
                     try:
-                        if strategy == "ensemble":
+                        if model.transport == ENSEMBLE_TRANSPORT:
+                            response = await self._multi_model_response(
+                                model,
+                                models,
+                                {
+                                    member["model"]: run["parameters"].get(
+                                        member["model"],
+                                        {p.name: p.default for p in models[member["model"]].parameters},
+                                    )
+                                    for member in model.members
+                                },
+                                item,
+                                run["reference_mode"],
+                                items.values(),
+                                dialect_profiles,
+                                example_pool,
+                            )
+                        elif strategy == "ensemble":
                             response = await self._ensemble_response(
                                 model,
                                 item,
@@ -293,6 +385,7 @@ class BenchmarkRunner:
                                 run["reference_mode"],
                                 items.values(),
                                 dialect_profiles,
+                                example_pool,
                             )
                         scores = score_transcript(reference_transcript, response.transcript)
                         self.repository.add_result(
@@ -379,13 +472,14 @@ class BenchmarkRunner:
         reference_mode: str,
         catalog: Iterable[DatasetItem],
         dialect_profiles: dict[str, dict[str, Any]],
+        examples: list[tuple[str, str]] | None = None,
     ) -> ItemPrompt:
         if strategy == "baseline":
             return ItemPrompt(cls._prompt_for_item(prompt, item.metadata, reference_mode))
 
         dialect_code = (item.metadata.get("dialect") or "").upper()
         profile = dialect_profiles.get(dialect_code, {})
-        examples = cls._few_shot_examples(item, catalog)
+        examples = cls._few_shot_examples(item, catalog) if examples is None else examples
         context = cls._dialect_context(item, profile)
         custom_prompt = prompt.strip()
         is_default_prompt = custom_prompt in {DEFAULT_TRANSCRIPTION_PROMPT, HIGH_GERMAN_TRANSCRIPTION_PROMPT, ""}
@@ -467,6 +561,7 @@ class BenchmarkRunner:
             candidate
             for candidate in catalog
             if candidate.id != item.id
+            and candidate.metadata.get("dataset") == item.metadata.get("dataset")
             and (candidate.metadata.get("dialect") or "").upper() == dialect
             and (sentence_id is None or candidate.metadata.get("sentence_id") != sentence_id)
             and candidate.reference_transcript
@@ -477,6 +572,18 @@ class BenchmarkRunner:
             (candidate.reference_transcript or "", candidate.metadata["standard_german_transcript"])
             for candidate in candidates[:count]
         ]
+
+    def _prompt_examples(
+        self, item: DatasetItem, catalog: Iterable[DatasetItem], example_pool: ExamplePool | None
+    ) -> list[tuple[str, str]]:
+        if self.settings.examples_path is not None and not item.metadata.get("dataset"):
+            if example_pool is None:
+                return []
+            return example_pool.sample(
+                item.metadata.get("dialect", ""), item.id, FEW_SHOT_EXAMPLE_COUNT,
+                item.metadata.get("sentence_id"),
+            )
+        return self._few_shot_examples(item, catalog)
 
     @staticmethod
     def _reference_for_item(item: DatasetItem, reference_mode: str) -> str | None:

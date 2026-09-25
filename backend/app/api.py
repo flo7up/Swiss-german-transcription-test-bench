@@ -3,21 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import csv
 from dataclasses import asdict
 import io
 import json
 import mimetypes
 import os
+from pathlib import Path
+import tempfile
 from typing import Any, Literal
+import uuid
+import zipfile
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .catalog import load_dataset_items, load_dialect_atlas, load_models, load_voice_options
+from .catalog import load_all_dataset_items, load_dialect_atlas, load_models, load_voice_options
+from .datasets import MAX_ARCHIVE_BYTES, extract_dataset_archive
 from .refiner import AzureOpenAITextRefiner, TextRefiner
 from .repository import RunRepository
 from .runner import BenchmarkRequest, BenchmarkRunner, DEFAULT_TRANSCRIPTION_PROMPT
@@ -90,10 +97,19 @@ def create_app(
     _configure_observability(settings)
     repository = RunRepository(settings.database_path)
     if refiner is None and settings.refiner_deployment:
-        refiner = AzureOpenAITextRefiner(settings.refiner_deployment, settings.refiner_reasoning_effort)
+        refiner = AzureOpenAITextRefiner(
+            settings.refiner_deployment, settings.refiner_reasoning_effort, api_key=settings.foundry_api_key
+        )
     runner = BenchmarkRunner(settings, repository, transcriber or RoutedAudioTranscriber(settings), refiner)
 
-    app = FastAPI(title="Swiss German Test Bench", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Runs only when a server actually starts (not on import), so a live server's runs are never touched.
+        # No worker survives a restart, so interrupted runs are paused and can be resumed from the UI.
+        repository.recover_interrupted_runs()
+        yield
+
+    app = FastAPI(title="Swiss German Test Bench", version="0.1.0", lifespan=lifespan)
     origins = [origin.strip() for origin in os.getenv("BENCHMARK_CORS_ORIGINS", "http://localhost:5173").split(",")]
     app.add_middleware(
         CORSMiddleware,
@@ -106,6 +122,7 @@ def create_app(
     app.state.repository = repository
     app.state.tasks = set()
     app.state.run_tasks = {}
+    app.state.dataset_upload_lock = asyncio.Lock()
 
     def schedule_run(run_id: str) -> None:
         existing_task = app.state.run_tasks.get(run_id)
@@ -127,17 +144,17 @@ def create_app(
     def health() -> dict[str, Any]:
         return {
             "status": "ok",
-            "authentication": "rbac-default-azure-credential",
+            "authentication": "api-key" if settings.foundry_api_key else "rbac-default-azure-credential",
             "foundry_configured": bool(settings.foundry_project_endpoint),
             "refiner_deployment": refiner.deployment if refiner is not None else None,
-            "model_count": len(load_models(settings.model_registry_path)),
+            "model_count": len(load_models(settings.model_registry_path, settings.custom_model_name)),
             "voice_option_count": len(load_voice_options(settings.voice_options_path)),
-            "dataset_item_count": len(load_dataset_items(settings.manifest_path)),
+            "dataset_item_count": len(load_all_dataset_items(settings.manifest_path, settings.uploaded_datasets_path)),
         }
 
     @app.get("/api/models")
     def models() -> list[dict[str, Any]]:
-        return [_model_payload(model) for model in load_models(settings.model_registry_path)]
+        return [_model_payload(model) for model in load_models(settings.model_registry_path, settings.custom_model_name)]
 
     @app.get("/api/instructions")
     def instruction_presets() -> list[dict[str, str]]:
@@ -160,17 +177,64 @@ def create_app(
 
     @app.get("/api/dataset/items")
     def dataset_items() -> list[dict[str, Any]]:
-        return [_item_payload(item) for item in load_dataset_items(settings.manifest_path)]
+        return [
+            _item_payload(item)
+            for item in load_all_dataset_items(settings.manifest_path, settings.uploaded_datasets_path)
+        ]
 
     @app.get("/api/dataset/items/{item_id}/audio")
     def dataset_item_audio(item_id: str) -> FileResponse:
-        items = {item.id: item for item in load_dataset_items(settings.manifest_path)}
+        items = {
+            item.id: item
+            for item in load_all_dataset_items(settings.manifest_path, settings.uploaded_datasets_path)
+        }
         item = items.get(item_id)
         if item is None or not item.audio_path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Audio clip not found.")
 
         media_type = mimetypes.guess_type(item.audio_path.name)[0] or "application/octet-stream"
         return FileResponse(item.audio_path, media_type=media_type)
+
+    @app.post("/api/datasets", status_code=status.HTTP_201_CREATED)
+    async def upload_dataset(request: Request, name: str = Query(min_length=1, max_length=80)) -> dict[str, Any]:
+        if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/zip":
+            raise HTTPException(status_code=415, detail="Upload a ZIP with Content-Type: application/zip.")
+        name = name.strip()
+        if not name or not name.isprintable():
+            raise HTTPException(status_code=422, detail="Dataset name must be printable and non-empty.")
+        if settings.uploaded_datasets_path is None:
+            raise HTTPException(status_code=503, detail="Configure BENCHMARK_DATASETS_DIR before uploading.")
+
+        root = settings.uploaded_datasets_path
+        root.mkdir(parents=True, exist_ok=True)
+        async with app.state.dataset_upload_lock:
+            existing_items = load_all_dataset_items(settings.manifest_path, root)
+            if any((item.metadata.get("dataset") or item.source).casefold() == name.casefold()
+                   for item in existing_items):
+                raise HTTPException(status_code=409, detail="A data source with this name already exists.")
+            with tempfile.TemporaryDirectory(prefix=".upload-", dir=root) as temporary:
+                staging = Path(temporary)
+                archive_path = staging / "upload.zip"
+                size = 0
+                with archive_path.open("wb") as output:
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > MAX_ARCHIVE_BYTES:
+                            raise HTTPException(status_code=413, detail="ZIP exceeds the 512 MiB upload limit.")
+                        output.write(chunk)
+                try:
+                    count = extract_dataset_archive(
+                        archive_path,
+                        staging / "dataset",
+                        name,
+                        {item.id for item in existing_items},
+                    )
+                except (ValueError, zipfile.BadZipFile) as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
+
+                dataset_id = uuid.uuid4().hex
+                (staging / "dataset").replace(root / dataset_id)
+                return {"id": dataset_id, "name": name, "item_count": count}
 
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:

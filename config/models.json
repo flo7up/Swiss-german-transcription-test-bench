@@ -4,7 +4,11 @@
 		"label": "OpenAI Realtime 2",
 		"deployment": "gpt-realtime-2",
 		"description": "Pay-per-use Global Standard realtime deployment. Batch tests decode each clip to PCM and request text-only transcription over the Realtime WebSocket API.",
-		"capabilities": ["audio", "transcription", "realtime"],
+		"capabilities": [
+			"audio",
+			"transcription",
+			"realtime"
+		],
 		"transport": "azure-openai-realtime",
 		"parameters": []
 	},
@@ -13,8 +17,141 @@
 		"label": "OpenAI Realtime 2.1",
 		"deployment": "gpt-realtime-2.1",
 		"description": "Pay-per-use Global Standard preview realtime deployment with improved silence and noise handling. Batch tests request text-only transcription over the Realtime WebSocket API.",
-		"capabilities": ["audio", "transcription", "realtime"],
+		"capabilities": [
+			"audio",
+			"transcription",
+			"realtime"
+		],
 		"transport": "azure-openai-realtime",
 		"parameters": []
+	},
+	{
+		"id": "openai-realtime-2-1-mini",
+		"label": "OpenAI Realtime 2.1 mini",
+		"deployment": "gpt-realtime-2.1-mini",
+		"description": "Cost-efficient GA sibling of Realtime 2.1 (2026-07-07). Batch tests decode each clip to PCM and request text-only output over the Realtime WebSocket API.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"realtime"
+		],
+		"transport": "azure-openai-realtime",
+		"parameters": []
+	},
+	{
+		"id": "openai-realtime-1-5",
+		"label": "OpenAI Realtime 1.5",
+		"deployment": "gpt-realtime-1.5",
+		"description": "GA realtime speech-to-speech model (2026-02-23), the predecessor of the Realtime 2 family. Text-only output over the Realtime WebSocket API.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"realtime"
+		],
+		"transport": "azure-openai-realtime",
+		"parameters": []
+	},
+	{
+		"id": "openai-audio-1-5",
+		"label": "OpenAI Audio 1.5",
+		"deployment": "gpt-audio-1.5",
+		"description": "Turn-based audio chat model (2026-02-23) over Chat Completions with input_audio. Follows instructions like a chat model and supports two-pass follow-up turns.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"audio-chat"
+		],
+		"transport": "azure-openai-audio-chat",
+		"parameters": []
+	},
+	{
+		"id": "openai-audio-mini",
+		"label": "OpenAI Audio mini",
+		"deployment": "gpt-audio-mini",
+		"description": "Lower-cost turn-based audio chat model (2025-12-15) over Chat Completions with input_audio.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"audio-chat"
+		],
+		"transport": "azure-openai-audio-chat",
+		"parameters": []
+	},
+	{
+		"id": "openai-transcribe",
+		"label": "OpenAI Transcribe",
+		"deployment": "gpt-transcribe",
+		"description": "Speech-to-text model (2026-07-28) via /audio/transcriptions. The prompt is used as context (dialect name and example sentences), not as instructions; no two-pass support.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"stt"
+		],
+		"transport": "azure-openai-transcription",
+		"parameters": []
+	},
+	{
+		"id": "openai-4o-transcribe",
+		"label": "GPT-4o Transcribe",
+		"deployment": "gpt-4o-transcribe",
+		"description": "GPT-4o speech-to-text model (2025-03-20) via /audio/transcriptions. The prompt is used as context; no two-pass support.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"stt"
+		],
+		"transport": "azure-openai-transcription",
+		"parameters": []
+	},
+	{
+		"id": "openai-4o-mini-transcribe",
+		"label": "GPT-4o mini Transcribe",
+		"deployment": "gpt-4o-mini-transcribe",
+		"description": "Lower-cost GPT-4o mini speech-to-text model (2025-12-15) via /audio/transcriptions. The prompt is used as context; no two-pass support.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"stt"
+		],
+		"transport": "azure-openai-transcription",
+		"parameters": []
+	},
+	{
+		"id": "openai-whisper",
+		"label": "Whisper",
+		"deployment": "whisper",
+		"description": "Classic Whisper speech-to-text model (Standard regional deployment) via /audio/transcriptions. Only the last 224 prompt tokens are used; no two-pass support.",
+		"capabilities": [
+			"audio",
+			"transcription",
+			"stt"
+		],
+		"transport": "azure-openai-transcription",
+		"parameters": []
+	},
+	{
+		"id": "multi-model-ensemble",
+		"label": "Multi-model ensemble",
+		"deployment": "Realtime 2.1 + GPT-4o Transcribe + GPT Transcribe, fused by the refiner",
+		"description": "Virtual model for the Ensemble strategy: hears each clip once with each member model (dialect-guided prompts) and fuses the hypotheses with BENCHMARK_REFINER_DEPLOYMENT. Members with pass 'target' answer in the run's task; 'dialect' always transcribes the dialect.",
+		"capabilities": [
+			"ensemble"
+		],
+		"transport": "ensemble",
+		"parameters": [],
+		"members": [
+			{
+				"model": "openai-realtime-2-1",
+				"pass": "target"
+			},
+			{
+				"model": "openai-4o-transcribe",
+				"pass": "target"
+			},
+			{
+				"model": "openai-transcribe",
+				"pass": "dialect"
+			}
+		]
 	}
 ]
